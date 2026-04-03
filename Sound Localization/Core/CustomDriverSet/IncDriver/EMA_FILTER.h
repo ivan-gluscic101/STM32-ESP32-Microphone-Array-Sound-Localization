@@ -1,0 +1,13 @@
+/*
+ * EMA_FILTER.h
+ *
+ *  Created on: Apr 3, 2026
+ *      Author: glusc
+ */
+
+#ifndef CUSTOMDRIVERSET_INCDRIVER_EMA_FILTER_H_
+#define CUSTOMDRIVERSET_INCDRIVER_EMA_FILTER_H_
+
+
+
+#endif /* CUSTOMDRIVERSET_INCDRIVER_EMA_FILTER_H_ */

@@ -1,0 +1,242 @@
+================================================================================
+  SOUND LOCALIZATION — DETALJNA DOKUMENTACIJA
+  UART_SendFrame petlja (C) i Python vizualizator
+================================================================================
+
+Datum: 2026-04-01
+Autor: Ivan Gluscic
+
+================================================================================
+1. UART_SendFrame — petlja slanja podataka (Core/Src/main.c)
+================================================================================
+
+Kod:
+
+    for (i = 0; i < samples_per_ch * NUM_CHANNELS; i++)
+    {
+        val = buf[i];
+        UART_SendByte((uint8_t)(val >> 8));
+        UART_SendByte((uint8_t)(val & 0xFF));
+    }
+
+────────────────────────────────────────────────────────
+Parametri i velicine
+────────────────────────────────────────────────────────
+
+  buf             — pokazivac na pocetak half-buffera (npr. &adc_buffer[0])
+  samples_per_ch  — broj uzoraka po kanalu = SAMPLES_PER_CHANNEL = 512
+  NUM_CHANNELS    — broj ADC kanala = 4
+
+  Broj iteracija: 512 * 4 = 2048
+  Broj poslatih bajtova: 2048 * 2 = 4096 (svaki uint16 -> 2 bajta)
+
+────────────────────────────────────────────────────────
+Raspored podataka u buf[] (interleaved, kako DMA puni)
+────────────────────────────────────────────────────────
+
+  Indeks   Sadrzaj
+  ───────  ────────────────
+  buf[0]   CH1, uzorak 0
+  buf[1]   CH2, uzorak 0
+  buf[2]   CH3, uzorak 0
+  buf[3]   CH4, uzorak 0
+  buf[4]   CH1, uzorak 1
+  buf[5]   CH2, uzorak 1
+  ...
+  buf[2047] CH4, uzorak 511
+
+  Obrazac ponavljanja: [CH1, CH2, CH3, CH4] po svakom uzorku.
+  DMA automatski puni ovakav redoslijed jer ADC sekvencer konvertira
+  kanale redom CH1 -> CH2 -> CH3 -> CH4 pri svakom triggeru.
+
+────────────────────────────────────────────────────────
+Primjer jedne iteracije
+────────────────────────────────────────────────────────
+
+  Pretpostavimo val = buf[2] = 3000 = 0x0BB8 (CH3, uzorak 0):
+
+    val >> 8     = 0x0B  -> UART_SendByte(0x0B)   (MSB, gornji bajt)
+    val & 0xFF   = 0xB8  -> UART_SendByte(0xB8)   (LSB, donji bajt)
+
+  Na serijski vod idu redom: [0x0B] [0xB8]
+
+  Python prima ova 2 bajta i rekonstruira uint16:
+    struct.unpack(">H", b'\x0B\xB8') -> 3000
+
+────────────────────────────────────────────────────────
+Zasto big-endian (MSB prvi)?
+────────────────────────────────────────────────────────
+
+  - Standardni mrezni byte order; Python struct modul ga podrzava s ">"
+  - Gornji bajt ADC vrijednosti je uvijek 0x00..0x0F (12-bit ADC, max 4095)
+  - 0xAA i 0xCC (SOF/EOF markeri) su veci od 0x0F, pa se ne mogu pojaviti
+    kao gornji bajt podatka -> markeri su jednoznacni u toku bajtova
+
+────────────────────────────────────────────────────────
+Cijeli frame koji se salje
+────────────────────────────────────────────────────────
+
+  Offset   Velicina   Sadrzaj
+  ───────  ─────────  ──────────────────────────────────────────
+  0        2 B        SOF marker: [0xAA][0xBB]
+  2        2 B        Frame ID, big-endian uint16 (inkrementira se)
+  4        4096 B     Podaci: 2048 uint16 vrijednosti, big-endian
+  4100     2 B        EOF marker: [0xCC][0xDD]
+
+  Ukupno: 4102 bajta po frameu.
+
+================================================================================
+2. PYTHON VIZUALIZATOR (Tools/visualizer.py)
+================================================================================
+
+────────────────────────────────────────────────────────
+Pregled arhitekture
+────────────────────────────────────────────────────────
+
+  Skripta koristi dvije niti:
+
+    Reader thread  — citanje serijskog porta, parsiranje frameova,
+                     punjenje rolling buffera
+    Matplotlib thread (glavna nit) — GUI, animacija, prikaz
+
+  Dijeljeno stanje medu nitima:
+    _rolling_buf  — numpy array s posljednih DISPLAY_SAMPLES uzoraka
+    _latest       — kopija rolling buffera za GUI nit
+    _frame_count  — ukupan broj primljenih frameova
+    _lock         — threading.Lock() za sigurno dijeljenje
+
+────────────────────────────────────────────────────────
+Konfigurabilne konstante
+────────────────────────────────────────────────────────
+
+  Konstanta          Vrijednost   Opis
+  ─────────────────  ──────────   ──────────────────────────────────────────
+  COM_PORT           COM8         Serijski port (override s argv[1])
+  BAUD_RATE          921600       Mora se podudarati s UART4 u main.c
+  NUM_CHANNELS       4            Mora se podudarati s main.c
+  SAMPLES_PER_CHAN   512          Mora se podudarati s main.c
+  SAMPLE_RATE_HZ     16000        Mora se podudarati s Timer8 konfiguracijom
+  FRAME_SKIP         4            Mora se podudarati s main.c
+  ADC_MAX            4095         12-bitni ADC
+  VREF               3.3          Referentni napon [V]
+  DISPLAY_CHANNEL    1            Koji kanal prikazati (0-3)
+  DISPLAY_SECONDS    3            Koliko sekundi povijesti u rolling bufferu
+
+────────────────────────────────────────────────────────
+Izvedene konstante
+────────────────────────────────────────────────────────
+
+  FRAME_DURATION_S   = 512 / 16000          = 0.032 s (32 ms po frameu)
+  EFFECTIVE_RATE_HZ  = 512 / (4 * 0.032)   = 4000 uzoraka/s
+                       (stvarna brzina uzorkovanja na PC strani jer
+                        STM32 salje svaki FRAME_SKIP-ti half-buffer)
+  DISPLAY_SAMPLES    = 3 * 4000             = 12000 uzoraka u rolling bufferu
+
+  T_S                — numpy linspace od 0 do DISPLAY_SECONDS
+                       (x-os grafa, 0 = najstariji, DISPLAY_SECONDS = najnoviji)
+
+────────────────────────────────────────────────────────
+find_and_read_frame(ser)
+────────────────────────────────────────────────────────
+
+  Koraci:
+    1. Cita byte po byte trazeci SOF sekvencu 0xAA 0xBB
+       - Ako naidje na 0xAA, cita sljedeci byte i provjerava je li 0xBB
+       - Ako nije, nastavlja s pretragom
+       - Ako je timeout (ser.read vraca prazno), vraca None
+
+    2. Cita tocno FRAME_REST_BYTES = 2 + 4096 + 2 = 4100 bajtova:
+       - Frame ID (2 B)
+       - Podaci (4096 B)
+       - EOF marker (2 B)
+
+    3. Provjerava EOF: zadnja 2 bajta moraju biti [0xCC, 0xDD]
+       - Ako nisu, frame je korumpiran -> vraca None, resinkronizira se
+
+    4. Raspakira podatke:
+       struct.unpack_from(f">{n_values}H", rest, offset=2)
+       - ">": big-endian
+       - "H": unsigned short (uint16)
+       - offset=2: preskace frame ID
+
+    5. De-interleave: iz ravnog niza [CH1_s0, CH2_s0, CH3_s0, CH4_s0, CH1_s1, ...]
+       u matricu oblika (4, 512):
+         channels[ch] = arr[ch::NUM_CHANNELS]
+       - arr[0::4] -> svi uzorci kanala 1
+       - arr[1::4] -> svi uzorci kanala 2
+       - arr[2::4] -> svi uzorci kanala 3
+       - arr[3::4] -> svi uzorci kanala 4
+
+    6. Vraca ndarray oblika (4, 512) ili None pri greski
+
+────────────────────────────────────────────────────────
+reader_thread(ser)
+────────────────────────────────────────────────────────
+
+  Pozadinska daemon nit.
+
+  Petlja:
+    1. Poziva find_and_read_frame(ser)
+    2. Ako frame nije None:
+       a. Uzima kanal koji se prikazuje: new_samples = frame[DISPLAY_CHANNEL]
+          -> ndarray od 512 float32 vrijednosti
+       b. Pomiče rolling buffer ulijevo za SAMPLES_PER_CHAN mjesta (np.roll)
+       c. Upisuje novih 512 uzoraka na kraj rolling buffera
+       d. Sprema kopiju u _latest (za GUI nit)
+       e. Inkrementira _frame_count
+    3. Ako SerialException: izlazi iz petlje (USB iskvaren)
+
+  np.roll(_rolling_buf, -512):
+    - Pomice sve elemente 512 mjesta ulijevo
+    - Najstarijih 512 uzoraka "ispada" s lijeve strane
+    - Nastaje "prozor" na desnoj strani koji se puni novim uzorcima
+
+────────────────────────────────────────────────────────
+animate(_)
+────────────────────────────────────────────────────────
+
+  Poziva se od matplotlib FuncAnimation svakih 50 ms (~20 FPS pokusaja).
+  Stvarni FPS je ogranicen ucijestalosti primanja frameova (~7.8 FPS).
+
+  Koraci:
+    1. Uzima _latest i _frame_count pod _lock-om
+    2. Ako _latest je None (jos nema podataka), vraca isti sadrzaj grafa
+    3. Azurira Y podatke linije: lines[0].set_ydata(frame)
+       - frame je numpy array od DISPLAY_SAMPLES float32 vrijednosti
+       - T_S (x-os) se ne mijenja, samo Y vrijednosti
+    4. Azurira status tekst: frame broj + proteklo audio vrijeme
+    5. Vraca listu izmijenjenih artista
+
+  Proteklo audio:
+    elapsed_s = frame_count * FRAME_SKIP * FRAME_DURATION_S
+              = frame_count * 4 * 0.032
+              = frame_count * 0.128 s
+
+────────────────────────────────────────────────────────
+Graf i prikaz
+────────────────────────────────────────────────────────
+
+  - Jedan subplot za odabrani kanal (DISPLAY_CHANNEL)
+  - X os: 0 do DISPLAY_SECONDS sekundi (0 = najstariji uzorak u bufferu,
+           DISPLAY_SECONDS = najnoviji uzorak)
+  - Y lijeva os: ADC vrijednost (Y_MIN do Y_MAX, default 2750..4095)
+  - Y desna os (twinx): napon u voltima (skalira se s VREF / ADC_MAX)
+  - blit=False: matplotlib redraw-a cijeli frame (jednostavnije za debugging)
+  - Status traka na dnu: broj framea i ukupno proteklo audio
+
+────────────────────────────────────────────────────────
+Tocnost vremenskog prikaza
+────────────────────────────────────────────────────────
+
+  Rolling buffer cuva DISPLAY_SAMPLES = 12000 uzoraka.
+  Svaki uzorak odgovara 1 / EFFECTIVE_RATE_HZ = 0.25 ms realnog vremena.
+  Puni prozor: 12000 * 0.25 ms = 3000 ms = 3 sekunde.
+
+  Vazno: EFFECTIVE_RATE_HZ (4000 Hz) != SAMPLE_RATE_HZ (16 kHz).
+  STM32 uzorkuje na 16 kHz, ali salje samo svaki 4. half-buffer.
+  Python prima 512 uzoraka svakih 128 ms, sto odgovara 4000 uzoraka/s
+  na strani PC-a.
+
+================================================================================
+KRAJ DOKUMENTA
+================================================================================

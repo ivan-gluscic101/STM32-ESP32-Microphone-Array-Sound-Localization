@@ -1,0 +1,196 @@
+================================================================
+PRVOBITNI TDOA ALGORITAM — Sound Localization
+Datum: 2026-04-02
+================================================================
+
+CILJ
+----
+Odrediti kut φ dolaska zvuka koristeći 2 mikrofona i jednostavan
+threshold detektor. Rezultat se šalje Python skripti za prikaz
+na 2D sferi.
+
+OGRANIČENJA
+-----------
+- S 2 mikrofona nije moguće izračunati apsolutnu udaljenost izvora.
+- Kut φ je definiret na polukružnici: raspon [-90°, +90°] od
+  okomice na os mikrofona (front-back ambiguity se ignorira).
+- Pri 16 kHz i razmaku 5 cm maksimalni TDOA = 2.33 uzorka →
+  svega 5-6 diskretnih kutnih razreda (rezolucija ~25° po koraku).
+
+KONSTANTE
+---------
+  THRESHOLD      = 3250       (ADC vrijednost za detekciju signala)
+  HALF_SIZE      = 256        (uzoraka po kanalu u polu-bufferu)
+  NUM_CH         = 4          (broj kanala u interleaved bufferu)
+  SAMPLE_RATE_HZ = 16000      (Hz)
+  SPEED_OF_SOUND = 343.0      (m/s, pri sobnoj temperaturi)
+  MIC_DIST_M     = 0.05       (5 cm razmak između mikrofona)
+  CH_DELAY_S     = 0.0000009  (0.9 µs — ADC sekvencijalni channel offset)
+
+================================================================
+KORAK 1 — THRESHOLD SCAN U HALF-BUFFER CALLBACKU
+================================================================
+
+Poziva se iz:
+  HAL_ADC_ConvHalfCpltCallback  → buf = &adcBuf[0]
+  HAL_ADC_ConvCpltCallback      → buf = &adcBuf[HALF_SIZE * NUM_CH]
+
+Buffer je interleaved: [CH0, CH1, CH2, CH3, CH0, CH1, ...]
+  CH0 = mic1 (PA0)
+  CH1 = mic2 (PB14)
+
+Algoritam:
+  n1 = -1   (indeks prvog triggera mic1)
+  n2 = -1   (indeks prvog triggera mic2)
+
+  za s = 0 do HALF_SIZE-1:
+      ch0 = buf[s * NUM_CH + 0]
+      ch1 = buf[s * NUM_CH + 1]
+
+      ako je n1 < 0  I  ch0 > THRESHOLD:
+          n1 = s
+
+      ako je n2 < 0  I  ch1 > THRESHOLD:
+          n2 = s
+
+      ako su oba n1 >= 0  I  n2 >= 0:
+          prekini petlju (rano izlaz)
+
+  ako je n1 < 0  ILI  n2 < 0:
+      odbaci ovaj half-buffer (nije triggerirano oba mikrofona)
+      vrati se bez slanja paketa
+
+================================================================
+KORAK 2 — IZRAČUN TDOA I KUTA φ
+================================================================
+
+  TDOA u sekundama (s korekcijom ADC channel offseta):
+      tdoa = (n1 - n2) / SAMPLE_RATE_HZ - CH_DELAY_S
+
+  Napomena o predznaku:
+      tdoa > 0 → mic1 triggerirao prvi → zvuk bliže mic1 strani
+      tdoa < 0 → mic2 triggerirao prvi → zvuk bliže mic2 strani
+
+  Omjer za arcsin (mora biti u [-1, 1]):
+      ratio = tdoa * SPEED_OF_SOUND / MIC_DIST_M
+
+      ako je ratio >  1.0 → ratio =  1.0   (numerička zaštita)
+      ako je ratio < -1.0 → ratio = -1.0
+
+  Kut u stupnjevima:
+      phi_rad = arcsin(ratio)
+      phi_deg = phi_rad * (180 / π)         raspon: [-90°, +90°]
+
+  Interpretacija:
+      phi =   0° → zvuk dolazi ravno okomito na os mikrofona
+      phi = +90° → zvuk dolazi direktno s mic2 strane
+      phi = -90° → zvuk dolazi direktno s mic1 strane
+
+================================================================
+KORAK 3 — IZRAČUN SIGNAL STRENGTH (zamjena za udaljenost)
+================================================================
+
+  Apsolutna udaljenost izvora nije izračunljiva s 2 mikrofona.
+  Koristimo maksimalnu amplitudu signala kao proxy:
+
+      amplitude = 0
+      za s = 0 do HALF_SIZE-1:
+          val = buf[s * NUM_CH + 0]
+          ako je val > amplitude:
+              amplitude = val
+
+      strength = (amplitude - THRESHOLD) * 100 / (4095 - THRESHOLD)
+      stegni strength na [0, 100]
+
+  Veći strength → jači/bliži zvuk → veća točka na sferi.
+
+================================================================
+KORAK 4 — UART PAKET (novi tip 0x02)
+================================================================
+
+  Format paketa (8 bajtova ukupno):
+
+      Bajt 0:   0xAA          SOF marker (visoki)
+      Bajt 1:   0xBB          SOF marker (niski)
+      Bajt 2:   0x02          Tip paketa: angle packet
+                              (0x01 = audio frame — ostaje nepromijenjen)
+      Bajt 3:   PHI_H         Gornji bajt kuta (int16, big-endian)
+      Bajt 4:   PHI_L         Donji bajt kuta
+                              Enkodiranje: phi_encoded = (int16)(phi_deg * 10)
+                              Primjeri: +25.4° → 254, -59.1° → -591
+      Bajt 5:   STR           Signal strength, uint8, raspon 0-100
+      Bajt 6:   0xCC          EOF marker (visoki)
+      Bajt 7:   0xDD          EOF marker (niski)
+
+  Kodiranje u C:
+      int16_t phi_encoded = (int16_t)(phi_deg * 10.0f);
+      uint8_t pkt[8] = {
+          0xAA, 0xBB,
+          0x02,
+          (phi_encoded >> 8) & 0xFF,
+          (phi_encoded)      & 0xFF,
+          (uint8_t)strength,
+          0xCC, 0xDD
+      };
+      HAL_UART_Transmit(&huart4, pkt, 8, HAL_MAX_DELAY);
+
+================================================================
+KORAK 5 — PARSIRANJE U PYTHONU
+================================================================
+
+  uart_reader.py:
+      Kada se detektira [0xAA][0xBB][0x02]:
+          pročitaj 5 bajtova (PHI_H, PHI_L, STR, 0xCC, 0xDD)
+          provjeri EOF
+          phi_deg   = int16(PHI_H << 8 | PHI_L) / 10.0
+          strength  = STR
+
+  app.py (unutar _animate, kuka za DoA):
+      phi, strength = self.reader.get_latest_angle()
+      ako phi nije None:
+          size = SPHERE_DOT_SIZE * (strength / 100.0)
+          self.sphere.add_dot(azimuth_deg=phi, elevation_deg=0.0, size=size)
+
+================================================================
+PRIKAZ NA SFERI
+================================================================
+
+  Rezultat je točka na POLUKRUŽNICI (0° = vrh, ±90° = bočni rubovi).
+  Druga polu-kružnica ostaje prazna (front-back ambiguity).
+
+  Vizualni efekt:
+      - Pozicija točke → smjer zvuka
+      - Veličina točke → jakost/blizina signala
+
+================================================================
+POZNATA OGRANIČENJA OVE VERZIJE
+================================================================
+
+  1. Rezolucija kuta:
+         1 uzorak TDOA ≈ 25° pomaka pri d=5cm, fs=16kHz
+         Svega 5-6 razreda: [-90°, -59°, -25°, 0°, +25°, +59°, +90°]
+
+  2. Radi samo za impulsne zvukove (pljeskanje, klik).
+     Za kontinuirani zvuk (govor) threshold ne funkcionira →
+     sljedeći korak: GCC-PHAT (generalizirana unakrsna korelacija).
+
+  3. Ako onset zvuka pada između dva half-buffera, jedan mikrofon
+     triggerira u prethodnom, drugi u sljedećem → lažni TDOA.
+     Privremeno rješenje: odbaci par ako samo jedan triggerira.
+
+  4. Šum ili DC drift mogu lažno trigerirati threshold →
+     poboljšanje: traži N uzastopnih uzoraka iznad praga
+     (histereza, npr. N=3).
+
+================================================================
+REDOSLJED IMPLEMENTACIJE
+================================================================
+
+  [1] Dodati process_half_buffer() funkciju u Core/Src/
+  [2] Pozvati iz HAL_ADC_ConvHalfCpltCallback i ConvCpltCallback
+  [3] Testirati slanje paketa (logic analyzerom ili Python printom)
+  [4] Dodati parsiranje 0x02 paketa u uart_reader.py
+  [5] Spojiti s app.py → sphere.add_dot()
+  [6] Vizualno verificirati s poznatim kutem (mjerilo + protractor)
+
+================================================================

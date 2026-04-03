@@ -1,0 +1,136 @@
+https://dev.st.com/stm32cube-docs/stm32u5-hal2/2.0.0-beta.1.1/docs/drivers/ll_drivers/dma/ll_dma_apis.html#ll-dma-apis 
+sve LL_xx funkcije
+
+PROJEKT : lokalizacija izvora zvuka temeljena na 4 mikrofona na stm32g474re devboardu
+TRENUTNA FAZA: - inicijalizirani ADC,DMA, TIMERI potrebni, sada treba slati podatke na neki COM port da vidimo rade li mikrofoni
+               - Prva zadaća je izvesti bare-metal ovu funkciju
+
+
+U adc konfiguraciji timer 8 trigger out će zapravo govorit ADC-u kada kreće sa sljedecim redom sampliranja
+S time da kad se timer8 okine onda se sampliraju sva 4 kanala
+Naš clock od ADC-a je 170MHz/4 presclaer, dakle 42.5MHz, Svaki ADC ima fs = 16kHz, pa izmedju sljedećeg sampliranja postoji 1/16000 = 62.5 us vremena 
+Naš clock od ADC-a je dovoljno brz da uzima više od jednog sample-a po ciklusu konvezije
+Default je 1.5 clock cycle po sample-u, a točnije je ako ima više sample-a
+1/42,5MHz = 23.33ns, svaki ADC ima period vremena gdje se vrijeme troši na uzimanje uroka napona i vrijeme gdje se ti uzorci pretvaraju u digitalzirani signal
+Recimo Tsample = 24.5 (ovo sami biramo) + Tconv = 12.5 clock cycle-ova = Ttotcycle 
+Ttot,cycle = 37 clock cycle-ova * 23.33ns = 870ns po kanalu
+Dakle provodit će 870ns*4 = 3.48 us na cijelokupnu obradu signala u ADC-u, to znači da mi od 62.5 us prije sljedećeg uzimanja uzorka samo trošimo 3.48 us 
+Naš ADC je 12-bitan, pa u DMA konfiguraciji stavljamo half-word u memoriju i half-word iz periferije, stavljamo buffer na circular jer tako za N uzoraka u bufferu se 
+samo braćamo na prvi opet, tj. za buffer B[0]B[1]....B[n-1], kad upisemo B[n-1] podatak u memoriju tada se samo bratimo opet na početak u B[0], dok bi konfiguracija sa 
+normal bufferom stala kad bi došli do B[n-1] podatka i nebi se vratili na B[0]
+DMA concinous requests govori DMA kontroleru da svaki put kad se sekvenca samplira da se DMA može uključit i slat memoriju, bez ovog bi jednom DMA poslao podatke i prestao tražit mogučnosti kad se može uključit
+Iz datasheet-a na blockdiagramu je vidljivo da je timer8 na APB2 sabirnici i onda u clock configuration je vidljivo da je main freqency ftim = 170Mhz i to bi trebalo supustit na 16kHz
+Update Frequency = (Ftim / (Prescaler + 1)) / (Period + 1)
+Mogu ostavit Presclaer na 0, i onda podjelit 16kHz = 170MHz / (10624 + 1) 
+Trigger event selection TRGO stavimo na Update Event, svaki put kad timer odbroji do ARR vrijednosti će triggerat event koji pokreće ADC
+Imat ćemo veliki buffer koji se puni sa DMA, recimo buffer veličine 4096 -> 1024 podataka po kanalu, s time da će se interrupt triggerat na HT (half transfer) i FT(full trasnfer), a ne svaki put kada dobijemo 4 podatka iz DMA
+Za DMA koristimo DMA1 Channel1
+
+
+
+
+LL_ADC_StartCalibration(ADC1);
+while (LL_ADC_IsCalibrationOnGoing(ADC1) != 0);
+Prije pokretanja bilo kojeg ADC-a prva funkcija kalibrira unutarnji offset, izvodi unutarnja mjerenja, a druga funkcija vraća 0 ako je kalibracija gotova, ili 1 ako još uvijek traje
+
+LL_ADC_Enable(ADC1);
+while (LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);
+Ove dvije funkcije se brinu da se ADC1 pokrene i da ne ide dalje dok se ADC zapravo ne pokrene, tj. dok ne odbijemo flag, ako dobijemo 1 znači da je ADC1 aktivan
+
+
+Generalno o pointerima i adresama 
+int x = 5;
+x je varijabla negdje u RAM-u
+&x označava adresu od x, na toj adresi bi našli vrijednost 5
+int *p = &x; 
+p = adresa
+*p = idi na tu adresu i nađi vrijednost
+print("%p",p) -> npr. x200000    -- pointer nije integer pa ne ide %d
+print("%d",*p) -> npr. 5
+
+Pointeri i adrese u funkcijama
+void foo(int *x){
+
+	*x = 10;
+
+}
+
+int main(){
+
+	int a = 5;
+	foo(&a);
+
+
+}
+
+foo je funkcija koja traži pointer, a rekli smo da je pointer *p pokazivac na adresu
+kad mi napravimo foo(&a), mi ubiti dajemo funkciji pristup na lokaciju gdje je spemljena varijabla a
+nakon ove funckije vrijednost a će biti 10. Mi smo pointali na adresu od a   *a = 10; i zalijepili smo tamo desetku
+
+
+
+HAL_StatusTypeDef HAL_ADC_Start_DMA(ADC_HandleTypeDef *hadc,uint32_t *pData,uint32_t Length);
+HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 100);
+
+
+Funkcija traži lokaciju na strukturu gdje se nalazi naš ADC, traži i adresu memorije gdje će spremat podaci *pdata
+kad bi napisali 
+HAL_ADC_Start_DMA(*hadc1, *adc_buffer, 100); to bi ubiti značilo da smo funkciji poslali vrijednost koja se nalazi na mjestu adrese strukture hadc1,
+još bi značilo da smo poslali vrijednost prvog *adc_buffer elementa u listi
+&hadc1 zapravo znači da smo mi funkciji poslali adresu gdje se nalazi registar od ADC1
+
+adc_buffer:   0x20002000  -> pointer na početak
+*adc_buffer:  1234        -> vrijednost na 0x20002000
+(uint32_t*)adc_buffer: 0x20002000  -> ista adresa, samo drugačiji tip
+uint16_t adc_buffer[2] = {100, 200};
+
+uint32_t *p32 = (uint32_t*)adc_buffer;  // cast pointer
+uint16_t  first = *adc_buffer;           // vrijednost prvog elementa
+
+printf("%d\n", first);   // ispisuje 100
+printf("%p\n", p32);     // ispisuje adresu 0x20002000
+
+ovo cast-anje iz uint16_t u uint32_t je potrebno jer funkcija očekuje 32 bitnu adresu
+
+
+
+U funkciji MX_ADC1_Init(void) već je definirano koji je trigger na sampliranje, kanali su svi konfigurirani
+
+LL_DMA_SetMemoryAddress(&hadc1, LL_DMA_CHANNEL_1, (uint32_t)adc_buffer);
+-javljamo gdje će se nalazit naši podaci, adc_buffer je dakle broj adrese 0x20002000 npr, s time da LL library očekuje integer adresu, a HAL library očekuje pointer na adresu
+LL doslovno piše u registar a HAL ima još dodatan sloj stvari što se dešava kod njega
+Ova funkcija se poziva prije uključenja glavnog kanala za prijenos podataka
+
+
+LL_DMA_SetPeriphAddress(DMA1, LL_DMA_CHANNEL_1, LL_ADC_DMA_GetRegAddr(ADC1, LL_ADC_DMA_REG_REGULAR_DATA));
+ovjde samo kažemo našem DMA1 kontroleru od kuda će uzimat podatke, tj. s kojeg ADC registra uzima podatke
+
+
+LL_DMA_EnableIT_HT(DMA1, LL_DMA_CHANNEL_1);  okinut će interrupt na pola buffera punog
+LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_1);  okinut će interrupt na cijeli puni buffer
+
+LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_1); konačno pokreće DMA kontroler i kanal njegov
+
+LL_ADC_REG_StartConversion(ADC1); --sada kanali mogu poćet konverziju čim dobe signal, u našem slučaju je to timer 8
+
+LL_TIM_EnableCounter(TIM8); --ovo će dati taj signal da ADC1 kanali mogu krenut u konverziju
+
+
+
+
+
+Procesuiranje buffera
+volatile uint8_t process_ping = 0;
+volatile uint8_t process_pong = 0;
+korisitmo volatile da complieru kažemo da se ta varijabla nebi trebala blizu promjeniti, niti se mora promijeniti unutar "main" petlje 
+Npr kad bi imali samo normalnu varijablu i da joj spremimo vrijednost var = 10 iz nekog registra, compiler nakon nekog vremena može mislit, aha!, ovo se nije dugo promijenilo niti će se promijenit!, a
+ustvari mi čekamo iz nekog vanjskog izvora da će se promijenit, ne nužno kad mi želimo 
+
+
+
+Interruptovi iz Half-transfera i Full-transfera ne dolaze kao obični interruptovi već samo kao DMA1_Channel1_IRQHandler(void), te unutar te funkcije trebamo handlat HT i FT sa dodatnim funkcijama
+LL_DMA_IsActiveFlag_HT1(DMA1) i LL_DMA_IsActiveFlag_TC1(DMA1),dakle prvo odredimo je li full ili half transfer, a zatim im trebamo maknut zastavice TF i HF
+LL_DMA_ClearFlag_HT1(DMA1) i LL_DMA_ClearFlag_TC1(DMA1);
+  
+
+

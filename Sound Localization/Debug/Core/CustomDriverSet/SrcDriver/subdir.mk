@@ -5,12 +5,18 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Core/CustomDriverSet/SrcDriver/EMA_FILTER.c \
+../Core/CustomDriverSet/SrcDriver/SMA_FILTER.c \
 ../Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.c 
 
 OBJS += \
+./Core/CustomDriverSet/SrcDriver/EMA_FILTER.o \
+./Core/CustomDriverSet/SrcDriver/SMA_FILTER.o \
 ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.o 
 
 C_DEPS += \
+./Core/CustomDriverSet/SrcDriver/EMA_FILTER.d \
+./Core/CustomDriverSet/SrcDriver/SMA_FILTER.d \
 ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.d 
 
 
@@ -21,7 +27,7 @@ Core/CustomDriverSet/SrcDriver/%.o Core/CustomDriverSet/SrcDriver/%.su Core/Cust
 clean: clean-Core-2f-CustomDriverSet-2f-SrcDriver
 
 clean-Core-2f-CustomDriverSet-2f-SrcDriver:
-	-$(RM) ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.cyclo ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.d ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.o ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.su
+	-$(RM) ./Core/CustomDriverSet/SrcDriver/EMA_FILTER.cyclo ./Core/CustomDriverSet/SrcDriver/EMA_FILTER.d ./Core/CustomDriverSet/SrcDriver/EMA_FILTER.o ./Core/CustomDriverSet/SrcDriver/EMA_FILTER.su ./Core/CustomDriverSet/SrcDriver/SMA_FILTER.cyclo ./Core/CustomDriverSet/SrcDriver/SMA_FILTER.d ./Core/CustomDriverSet/SrcDriver/SMA_FILTER.o ./Core/CustomDriverSet/SrcDriver/SMA_FILTER.su ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.cyclo ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.d ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.o ./Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.su
 
 .PHONY: clean-Core-2f-CustomDriverSet-2f-SrcDriver
 

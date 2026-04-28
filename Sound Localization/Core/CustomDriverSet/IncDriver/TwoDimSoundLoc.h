@@ -18,7 +18,8 @@ extern "C" {
 #include <stdint.h>
 
 /* ── Konstante uzorkovanja (moraju odgovarati ADC/TIM konfiguraciji) ────────*/
-#define THRESHOLD        3400          /* ADC vrijednost iznad koje smatramo da je zvuk */
+#define THRESHOLD_HIGH        3550          /* ADC vrijednost iznad koje smatramo da je zvuk */
+#define THRESHOLD_LOW    2900
 #define HALF_SIZE        256           /* uzoraka po kanalu u jednom half-bufferu        */
 #define NUM_CH           4             /* broj interleaved kanala u bufferu              */
 #define SAMPLE_RATE_HZ   16000         /* frekvencija uzorkovanja [Hz]                   */
@@ -41,6 +42,8 @@ extern "C" {
 #define ANGLE_PKT_EOF1   0xCC
 #define ANGLE_PKT_EOF2   0xDD
 
+
+#define SILENCE_FRAMES 8 /*Definiramo nakon kojeg vremena prihvaćamo sljedeći zvuk, 1frame = 1halfbuffer -> 256 sampl * 1/16khz = 0.016*/
 /*
  * LOC_Process — threshold TDOA obrada jednog half-buffera
  *

@@ -174,9 +174,9 @@ class UARTReader:
         # PHI je int16 big-endian, enkodiran kao phi_deg * 10
         phi_encoded = struct.unpack('>h', rest[0:2])[0]   # signed int16
         phi_deg     = phi_encoded / 10.0
-        #print(phi_deg, phi_encoded)
+        #print(f"[ANGLE] phi={phi_deg:.1f}° strength={strength}")
         strength    = rest[2]
-
+        print(phi_deg)
         return ('angle', (phi_deg, strength))
 
     def _parse_audio_frame(self, id_high_byte: int):
@@ -202,7 +202,7 @@ class UARTReader:
         # Raspakiraj uint16 vrijednosti (big-endian), preskoči 2B frame_id
         n   = self.num_channels * self.samples_per_chan
         raw = struct.unpack_from(f">{n}H", full_rest, offset=2)
-        print(raw)
+        #print(raw)
         arr = np.array(raw, dtype=np.float32)
 
         # De-interleaving: [CH0_s0, CH1_s0, ..., CH0_s1, CH1_s1, ...]

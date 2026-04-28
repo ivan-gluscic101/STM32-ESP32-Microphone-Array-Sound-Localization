@@ -18,11 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "TwoDimSoundLoc.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "TwoDimSoundLoc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,15 +70,14 @@
 
 COM_InitTypeDef BspCOMInit;
 
+osThreadId defaultTaskHandle;
+osThreadId processTaskHandle;
+osThreadId CommTaskHandle;
+osMessageQId queueXommDataHandle;
+osSemaphoreId semAudioReadyHandle;
 /* USER CODE BEGIN PV */
-uint16_t adc_buffer[FULL_BUFFER];   /* DMA upisuje ovdje, CPU cita */
-volatile uint8_t process_ping = 0;  /* postavlja IRQ kad je prva polovica buffera puna */
-volatile uint8_t process_pong = 0;  /* postavlja IRQ kad je druga polovica buffera puna */
-
-static uint16_t frame_id       = 0; /* redni broj framea, inkrementira se pri svakom slanju */
-static uint8_t  frame_skip_cnt = 0; /* broji preskocene half-buffer dogadaje */
-
-/*ove dvije stvari su skoro pa useless za sad*/
+uint16_t adc_buffer[FULL_BUFFER];  /* DMA upisuje ovdje, taskovi citaju */
+static uint16_t frame_id = 0;      /* redni broj audio framea */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -88,6 +87,10 @@ static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_UART4_Init(void);
 static void MX_TIM8_Init(void);
+void StartDefaultTask(void const * argument);
+void StartTask02(void const * argument);
+void StartTask03(void const * argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -241,6 +244,49 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* definition and creation of semAudioReady */
+  osSemaphoreDef(semAudioReady);
+  semAudioReadyHandle = osSemaphoreCreate(osSemaphore(semAudioReady), 1);
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* definition and creation of queueXommData */
+  osMessageQDef(queueXommData, 4, 8);
+  queueXommDataHandle = osMessageCreate(osMessageQ(queueXommData), NULL);
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of defaultTask */
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 256);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+
+  /* definition and creation of processTask */
+  osThreadDef(processTask, StartTask02, osPriorityAboveNormal, 0, 512);
+  processTaskHandle = osThreadCreate(osThread(processTask), NULL);
+
+  /* definition and creation of CommTask */
+  osThreadDef(CommTask, StartTask03, osPriorityNormal, 0, 256);
+  CommTaskHandle = osThreadCreate(osThread(CommTask), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
   /* Initialize led */
   BSP_LED_Init(LED_GREEN);
 
@@ -258,63 +304,14 @@ int main(void)
     Error_Handler();
   }
 
-  /* Infinite loop */
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    /* Lokalne varijable za TDOA rezultat — deklarirane ovdje zbog C89 stila */
-    int16_t phi_tenth_deg;
-    uint8_t strength;
-
-    /* --- PING: prva polovica buffera (adc_buffer[0 .. HALF_BUFFER-1]) --- */
-    if (process_ping)
-    {
-      process_ping = 0;
-
-      /* TDOA obrada — svaki half-buffer, bez preskakanja */
-      if (LOC_Process(&adc_buffer[0], &phi_tenth_deg, &strength))
-      {
-        UART_SendAnglePacket(phi_tenth_deg, strength);
-      }
-
-      /* Audio frame — samo svaki FRAME_SKIP half-buffer */
-      frame_skip_cnt++;
-      if (frame_skip_cnt >= FRAME_SKIP)
-      {
-        frame_skip_cnt = 0;
-        /* Salji prvu polovicu buffera; DMA trenutno puni drugu polovicu
-         * pa je prva sigurna za citanje */
-        UART_SendFrame(&adc_buffer[0], SAMPLES_PER_CHANNEL);
-        BSP_LED_Toggle(LED_GREEN); /* vizualna indikacija slanja */
-      }
-    }
-
-    /* --- PONG: druga polovica buffera (adc_buffer[HALF_BUFFER .. FULL_BUFFER-1]) --- */
-    if (process_pong)
-    {
-      process_pong = 0;
-
-      /* TDOA obrada — svaki half-buffer, bez preskakanja */
-      if (LOC_Process(&adc_buffer[HALF_BUFFER], &phi_tenth_deg, &strength))
-      {
-        UART_SendAnglePacket(phi_tenth_deg, strength);
-      }
-
-      /* Audio frame — samo svaki FRAME_SKIP half-buffer */
-      frame_skip_cnt++;
-      if (frame_skip_cnt >= FRAME_SKIP)
-      {
-        frame_skip_cnt = 0;
-        /* Salji drugu polovicu buffera; DMA trenutno puni prvu polovicu
-         * pa je druga sigurna za citanje */
-        UART_SendFrame(&adc_buffer[HALF_BUFFER], SAMPLES_PER_CHANNEL);
-        BSP_LED_Toggle(LED_GREEN);
-      }
-    }
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-  }
+  while (1) { }
+  /* USER CODE END WHILE */
+  /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
 
@@ -439,7 +436,7 @@ static void MX_ADC1_Init(void)
   LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MDATAALIGN_HALFWORD);
 
   /* ADC1 interrupt Init */
-  NVIC_SetPriority(ADC1_2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),0, 0));
+  NVIC_SetPriority(ADC1_2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(ADC1_2_IRQn);
 
   /* USER CODE BEGIN ADC1_Init 1 */
@@ -534,7 +531,7 @@ static void MX_TIM8_Init(void)
   /* USER CODE END TIM8_Init 1 */
   TIM_InitStruct.Prescaler = 0;
   TIM_InitStruct.CounterMode = LL_TIM_COUNTERMODE_UP;
-  TIM_InitStruct.Autoreload = 10624;
+  TIM_InitStruct.Autoreload = 2655;
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   TIM_InitStruct.RepetitionCounter = 0;
   LL_TIM_Init(TIM8, &TIM_InitStruct);
@@ -637,7 +634,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
-  NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),0, 0));
+  NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
 }
@@ -667,6 +664,100 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void const * argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartTask02 */
+/**
+* @brief Function implementing the processTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask02 */
+void StartTask02(void const * argument)
+{
+  /* USER CODE BEGIN StartTask02 */
+  static uint8_t frame_skip_cnt = 0;
+
+  for(;;)
+  {
+    osEvent evt = osMessageGet(queueXommDataHandle, osWaitForever);
+    if (evt.status != osEventMessage) continue;
+
+    uint32_t buf_sel = evt.value.v;          /* 0 = ping, 1 = pong */
+    const uint16_t *buf = &adc_buffer[buf_sel * HALF_BUFFER];
+
+    int16_t phi_tenth_deg;
+    uint8_t strength;
+    if (LOC_Process(buf, &phi_tenth_deg, &strength))
+      UART_SendAnglePacket(phi_tenth_deg, strength);
+
+    frame_skip_cnt++;
+    if (frame_skip_cnt >= FRAME_SKIP)
+    {
+      frame_skip_cnt = 0;
+      UART_SendFrame(buf, SAMPLES_PER_CHANNEL);
+      BSP_LED_Toggle(LED_GREEN);
+    }
+  }
+  /* USER CODE END StartTask02 */
+}
+
+/* USER CODE BEGIN Header_StartTask03 */
+/**
+* @brief Function implementing the CommTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask03 */
+void StartTask03(void const * argument)
+{
+  /* USER CODE BEGIN StartTask03 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartTask03 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

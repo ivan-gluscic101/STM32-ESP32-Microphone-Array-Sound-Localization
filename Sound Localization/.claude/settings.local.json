@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//c/ST/STM32CubeIDE_1.19.0/**)",
-      "Read(//c/ST/**)",
-      "Bash(arm-none-eabi-gcc --version)"
-    ]
-  }
-}

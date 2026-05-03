@@ -3,3 +3,6 @@
 
 # Izvješća i privremeni tekstualni fajlovi
 *.txt
+
+# Build output
+debug/

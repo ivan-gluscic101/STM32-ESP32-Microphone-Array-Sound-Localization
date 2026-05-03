@@ -1,9 +1,14 @@
 """
 config.py — Sve podešive konstante za Sound Localization vizualizator.
-Implementirano: 2026-04-02
 
-Uredi samo ovu datoteku kako bi promijenio portove, frekvencije uzorkovanja,
-postavke prikaza i sl. Ostatak koda čita vrijednosti odavde.
+ISPRAVKE:
+  1. EFFECTIVE_RATE_HZ popravljen: bio je SAMPLES_PER_CHAN/(FRAME_SKIP*FRAME_DURATION_S)
+     = 4000, ali to je SAMPLE_RATE_HZ, ne FPS. Ispravno: 1/(FRAME_SKIP*FRAME_DURATION_S)
+     = 1/0.128 ≈ 7.8125 FPS.
+  2. DISPLAY_SAMPLES preimenovan u DISPLAY_FRAMES za jasnoću — ovo je broj
+     frameova koji stane u DISPLAY_SECONDS, ne broj audio uzoraka.
+  3. ROLLING_BUFFER_LEN dodan — ukupan broj uzoraka u rolling bufferu
+     = DISPLAY_FRAMES × SAMPLES_PER_CHAN. Ovo je prava dimenzija za numpy niz.
 """
 
 import sys
@@ -13,59 +18,60 @@ import math
 COM_PORT  = sys.argv[1] if len(sys.argv) > 1 else "COM8"
 BAUD_RATE = 921600
 
-# ── Hardver / firmware (mora se podudarati s main.c) ─────────────────────────
-NUM_CHANNELS     = 4       # broj mikrofona / kanala
-SAMPLES_PER_CHAN = 512     # uzoraka po kanalu po frameu
-SAMPLE_RATE_HZ   = 16000  # frekvencija uzorkovanja ADC-a [Hz]
-FRAME_SKIP       = 4       # šalje se svaki N-ti half-buffer
-ADC_MAX          = 4095   # maksimalna vrijednost 12-bitnog ADC-a
-VREF             = 3.3    # referentni napon ADC-a [V]
+# ── Hardver / firmware (mora se podudarati s audio_common.h) ──────────────────
+NUM_CHANNELS     = 4
+SAMPLES_PER_CHAN = 512
+SAMPLE_RATE_HZ   = 64000   # TIM8 ARR=2655 → 64 kHz trigger; scan mode → 64 kHz/kanalu
+FRAME_SKIP       = 16      # vrijedi samo kad je SEND_AUDIO_FRAMES=1 u firmwareu
+ADC_MAX          = 4095
+VREF             = 3.3
 
-# ── Fizikalne konstante mikrofona (mora se podudarati s TwoDimSoundLoc.h) ────
-# Promijeni MIC_DIST_M ovdje i sve izvedene vrijednosti se automatski ažuriraju
-SPEED_OF_SOUND   = 343.0   # brzina zvuka pri sobnoj temperaturi [m/s]
-MIC_DIST_M       = 0.20    # razmak između mikrofona [m] — trenutno 20 cm
-CH_DELAY_S       = 0.9e-6  # ADC sekvencijalni channel offset [s]
+# ── Prikaz (Python strana) ────────────────────────────────────────────────────
+SHOW_WAVEFORM    = False   # True = prikaži valne oblike; False = samo kut+jakost
 
-# Izvedene fizikalne granice — koriste se za prikaz na sferi i sanity check
-TDOA_MAX_S       = MIC_DIST_M / SPEED_OF_SOUND          # maks. TDOA [s]
-TDOA_MAX_SAMPLES = TDOA_MAX_S * SAMPLE_RATE_HZ           # maks. TDOA [uzorci]
-# Diskretni kutevi koje sustav može razlikovati (jedan uzorak TDOA razlike)
-# Pri 20 cm i 16 kHz: TDOA_max = 583 µs = 9.3 uzoraka → ~18 razreda
+# ── Fizikalne konstante mikrofona (mora se podudarati s audio_common.h) ───────
+SPEED_OF_SOUND   = 343.0
+MIC_DIST_M       = 0.20
+CH_DELAY_S       = 0.9e-6
+
+# Izvedene fizikalne granice
+TDOA_MAX_S       = MIC_DIST_M / SPEED_OF_SOUND
+TDOA_MAX_SAMPLES = TDOA_MAX_S * SAMPLE_RATE_HZ
 ANGULAR_RES_DEG  = math.degrees(
     math.asin(min(1.0, (1 / SAMPLE_RATE_HZ) * SPEED_OF_SOUND / MIC_DIST_M))
-)  # kutna razlučivost po jednom uzorku TDOA [°] (aproksimacija oko 0°)
+)
 
 # ── Mapiranje kanala ──────────────────────────────────────────────────────────
-#   0 = mic1 / PA0    1 = mic2 / PB14
-#   2 = mic3 / PC0    3 = mic4 / PC1
 CHANNEL_NAMES  = ["mic1 PA0", "mic2 PB14", "mic3 PC0", "mic4 PC1"]
 CHANNEL_COLORS = ["#1f77b4",  "#ff7f0e",   "#2ca02c",  "#d62728"]
-
-# Kanali koje firmware šalje (podskup od 0-3)
 DISPLAY_CHANNEL = [0, 1, 2, 3]
-
-# Koliko kanala prikazati u waveform prikazu (1-4)
 ACTIVE_CHANNEL_VIEW = 2
 
 # ── Postavke prikaza valnog oblika ────────────────────────────────────────────
-DISPLAY_SECONDS = 2    # duljina kliznog prozora [s]
-Y_MIN           = 2750
+DISPLAY_SECONDS = 2
+Y_MIN           = 0       # ISPRAVKA: bilo 2750 — sada puni raspon ADC-a
 Y_MAX           = 4095
 
-# ── Postavke prikaza sfere ────────────────────────────────────────────────────
-# Maksimalni broj točaka koje se čuvaju na sferi; najstarija se briše kad se prekorači
-SPHERE_MAX_DOTS  = 50
-# Boja i prozirnost nove točke smjera zvuka
-SPHERE_DOT_COLOR    = "#e63946"
-SPHERE_DOT_ALPHA    = 0.85
-SPHERE_DOT_SIZE     = 80    # veličina markera (scatter)
-SPHERE_DOT_LIFETIME = 0.5   # trajanje točke na sferi [s]
+# ── Postavke prikaza smjera zvuka ─────────────────────────────────────────────
+SPHERE_MAX_DOTS      = 50
+SPHERE_DOT_COLOR     = "#e63946"
+SPHERE_DOT_ALPHA     = 0.85
+SPHERE_DOT_SIZE      = 80
+SPHERE_DOT_LIFETIME  = 2.0   # ISPRAVKA: bilo 0.5s — prekratko za praćenje
 
-# ── Izvedene konstante (ne mijenjaj) ─────────────────────────────────────────
+# ── Izvedene konstante ───────────────────────────────────────────────────────
 SOF = bytes([0xAA, 0xBB])
 EOF = bytes([0xCC, 0xDD])
 
-FRAME_DURATION_S  = SAMPLES_PER_CHAN / SAMPLE_RATE_HZ
-EFFECTIVE_RATE_HZ = int(SAMPLES_PER_CHAN / (FRAME_SKIP * FRAME_DURATION_S))
-DISPLAY_SAMPLES   = DISPLAY_SECONDS * EFFECTIVE_RATE_HZ
+FRAME_DURATION_S  = SAMPLES_PER_CHAN / SAMPLE_RATE_HZ         # 0.032 s
+
+# ISPRAVKA: Ovo je frekvencija DOLAZEĆIH FRAMEOVA, ne sample rate
+EFFECTIVE_FPS     = 1.0 / (FRAME_SKIP * FRAME_DURATION_S)     # ≈ 7.8125 FPS
+DISPLAY_FRAMES    = int(DISPLAY_SECONDS * EFFECTIVE_FPS)       # ≈ 15 frameova
+
+# Ukupan broj uzoraka u rolling bufferu za prikaz
+ROLLING_BUFFER_LEN = DISPLAY_FRAMES * SAMPLES_PER_CHAN         # ≈ 7680 uzoraka
+
+# Backward compatibility
+DISPLAY_SAMPLES   = ROLLING_BUFFER_LEN
+EFFECTIVE_RATE_HZ = EFFECTIVE_FPS

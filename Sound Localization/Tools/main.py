@@ -1,6 +1,5 @@
 """
 main.py — Ulazna točka za Sound Localization vizualizator.
-Implementirano: 2026-04-02
 
 Pokretanje:
     python main.py

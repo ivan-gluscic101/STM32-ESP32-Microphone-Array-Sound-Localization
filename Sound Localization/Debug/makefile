@@ -9,6 +9,10 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
+-include Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/subdir.mk
+-include Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/subdir.mk
+-include Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/subdir.mk
+-include Middlewares/Third_Party/FreeRTOS/Source/subdir.mk
 -include Drivers/STM32G4xx_HAL_Driver/Src/subdir.mk
 -include Drivers/BSP/STM32G4xx_Nucleo/subdir.mk
 -include Core/Startup/subdir.mk
@@ -62,8 +66,8 @@ all: main-build
 main-build: Sound\ Localization.elf secondary-outputs
 
 # Tool invocations
-Sound\ Localization.elf Sound\ Localization.map: $(OBJS) $(USER_OBJS) C:\Users\glusc\zavRad\Sound\ Localization\STM32G474RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "Sound Localization.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\glusc\zavRad\Sound Localization\STM32G474RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Sound Localization.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Sound\ Localization.elf Sound\ Localization.map: $(OBJS) $(USER_OBJS) C:\Users\Gluscic\STM32-ESP32-Microphone-Array-Sound-Localization\Sound\ Localization\STM32G474RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "Sound Localization.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\Gluscic\STM32-ESP32-Microphone-Array-Sound-Localization\Sound Localization\STM32G474RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Sound Localization.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

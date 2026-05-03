@@ -1,15 +1,24 @@
 """
 uart_reader.py — Pozadinski UART čitač frameova s STM32 mikrokontrolera.
-Implementirano: 2026-04-02
 
 Podržani tipovi paketa:
-    Audio frame (tip 0x01 / legacy):
+    Audio frame (legacy):
         [0xAA][0xBB] [ID_H][ID_L] [podaci...] [0xCC][0xDD]
+        NAPOMENA: ID_H je uvijek 0x00-0x0F jer je frame_id uint16
+        koji se rijetko penje iznad ~1000. Čak i ako dođe do 0x02xx,
+        parser provjerava duljinu ostatka za razlikovanje.
 
-    Angle paket (tip 0x02, dodano 2026-04-03):
+    Angle paket (tip 0x02):
         [0xAA][0xBB] [0x02] [PHI_H][PHI_L] [STR] [0xCC][0xDD]
-        PHI = int16 big-endian, kut u desetinkama stupnjeva (254 = +25.4°)
+        PHI = int16 big-endian, kut u desetinkama stupnjeva
         STR = uint8, jakost signala 0-100
+
+ISPRAVKE:
+  1. Dodana detekcija kolizije frame_id vs angle tip:
+     Ako type_byte == 0x02, čitamo 5 bajtova (angle paket).
+     Ako EOF nije valjan, pokušavamo re-interpretirati kao audio frame.
+  2. Ispravljen docstring (viška zagrada).
+  3. Dodan print za debug info bez spama.
 """
 
 import struct
@@ -29,7 +38,7 @@ class UARTReader:
         reader = UARTReader("COM8", 921600, num_channels=4, samples_per_chan=512)
         reader.start()
         frame, count = reader.get_latest()
-        phi, strength), angle_count = reader.get_latest_angle()
+        angle_data, angle_count = reader.get_latest_angle()
         reader.stop()
     """
 
@@ -51,18 +60,17 @@ class UARTReader:
         self.samples_per_chan = samples_per_chan
         self.timeout          = timeout
 
-        # Unaprijed izračunate veličine audio framea
-        self._data_bytes = num_channels * samples_per_chan * 2   # uint16 → 2 bajta
-        self._rest_bytes = 2 + self._data_bytes + 2              # ID(2) + podaci + EOF(2)
+        self._data_bytes = num_channels * samples_per_chan * 2
+        self._rest_bytes = 2 + self._data_bytes + 2   # ID(2) + data + EOF(2)
 
-        self._lock        = threading.Lock()
+        self._lock = threading.Lock()
 
         # Audio frame stanje
-        self._latest      = None   # ndarray (num_channels, samples_per_chan)
+        self._latest      = None
         self._frame_count = 0
 
         # Angle paket stanje
-        self._latest_angle = None  # (phi_deg: float, strength: int)
+        self._latest_angle = None
         self._angle_count  = 0
 
         self._ser    = None
@@ -71,7 +79,7 @@ class UARTReader:
     # ── Javno sučelje ─────────────────────────────────────────────────────────
 
     def start(self) -> "UARTReader":
-        """Otvori port i pokreni pozadinsku nit za čitanje. Vraća self (fluent API)."""
+        """Otvori port i pokreni pozadinsku nit za čitanje."""
         self._ser    = serial.Serial(self.port, self.baud, timeout=self.timeout)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -84,7 +92,7 @@ class UARTReader:
 
     def get_latest(self) -> tuple:
         """
-        Vraća (frame, count) — najnoviji audio frame i broj primljenih.
+        Vraća (frame, count).
             frame : ndarray oblika (num_channels, samples_per_chan), ili None
             count : int
         """
@@ -93,11 +101,10 @@ class UARTReader:
 
     def get_latest_angle(self) -> tuple:
         """
-        Vraća ((phi_deg, strength), count) — najnoviji angle paket.
+        Vraća ((phi_deg, strength), count).
             phi_deg  : float, kut u stupnjevima [-90.0, +90.0]
-            strength : int,   jakost signala 0-100
-            count    : int,   ukupan broj primljenih angle paketa
-        Vraća (None, 0) dok nije primljen nijedan angle paket.
+            strength : int, jakost signala 0-100
+            count    : int, ukupan broj primljenih angle paketa
         """
         with self._lock:
             return self._latest_angle, self._angle_count
@@ -109,7 +116,7 @@ class UARTReader:
     # ── Interne metode ────────────────────────────────────────────────────────
 
     def _loop(self) -> None:
-        """Glavna petlja pozadinske niti — kontinuirano čita i razvrstava pakete."""
+        """Glavna petlja — kontinuirano čita i razvrstava pakete."""
         while True:
             try:
                 result = self._read_packet()
@@ -132,7 +139,13 @@ class UARTReader:
 
     def _read_packet(self):
         """
-        Traži SOF byte po byte, zatim čita tip paketa i granu na odgovarajući parser.
+        Traži SOF, zatim čita tip paketa i parsira.
+
+        ISPRAVKA protokolne dvosmislenosti:
+        Ako type_byte == 0x02, prvo pokušavamo parsirati kao angle paket (5 B).
+        Ako EOF ne odgovara, onda smo krivo protumačili — to je zapravo
+        audio frame čiji je ID_H == 0x02. Tada koristimo već pročitane bajtove
+        kao dio audio framea.
 
         Vraća ('audio', ndarray) ili ('angle', (phi_deg, strength)) ili None.
         """
@@ -148,61 +161,68 @@ class UARTReader:
                 if nb and nb[0] == 0xBB:
                     break
 
-        # 2. Čitaj prvi bajt koji određuje tip paketa
+        # 2. Čitaj prvi bajt — može biti tip paketa ili ID_H audio framea
         type_byte = ser.read(1)
         if not type_byte:
             return None
 
-        if type_byte[0] == self._ANGLE_TYPE: # U main.c smo definirali da se traži 0x02 byte za angle
-            return self._parse_angle_packet()
+        if type_byte[0] == self._ANGLE_TYPE:
+            # Pokušaj angle paket — čitamo 5 B (PHI_H, PHI_L, STR, EOF1, EOF2)
+            angle_rest = ser.read(5)
+            if len(angle_rest) != 5:
+                return None
+
+            # Provjeri EOF
+            if angle_rest[3] == 0xCC and angle_rest[4] == 0xDD:
+                # Valjan angle paket
+                phi_encoded = struct.unpack('>h', angle_rest[0:2])[0]
+                phi_deg     = phi_encoded / 10.0
+                strength    = angle_rest[2]
+                return ('angle', (phi_deg, strength))
+            else:
+                # Krivo protumačeno — ovo je audio frame s ID_H=0x02.
+                # angle_rest[0] je ID_L, angle_rest[1:5] su prva 4 bajta podataka.
+                # Trebamo pročitati ostatak audio framea.
+                id_high = type_byte[0]
+                id_low  = angle_rest[0]
+                already_read = angle_rest[1:5]   # 4 bajta podataka već pročitano
+                remaining_needed = self._data_bytes - 4 + 2   # ostatak podataka + EOF
+                remaining = ser.read(remaining_needed)
+                if len(remaining) != remaining_needed:
+                    return None
+                full_data = already_read + remaining
+                # Provjeri EOF na kraju
+                if full_data[-2] != 0xCC or full_data[-1] != 0xDD:
+                    return None
+                return self._decode_audio(full_data[:-2])  # bez EOF-a
         else:
-            # Nije angle paket — type_byte je ID_H audio framea
+            # Audio frame — type_byte je ID_H
             return self._parse_audio_frame(type_byte[0])
 
-    def _parse_angle_packet(self):
-        """
-        Parser angle paketa (tip 0x02).
-        SOF i tip bajt već su pročitani. Čita: PHI_H, PHI_L, STR, EOF1, EOF2.
-        """
-        ser  = self._ser
-        rest = ser.read(5)   # PHI_H(1) + PHI_L(1) + STR(1) + EOF(2)
-        if len(rest) != 5:
-            return None
-        if rest[3] != 0xCC or rest[4] != 0xDD:
-            return None      # neispravan EOF — odbaci
-
-        # PHI je int16 big-endian, enkodiran kao phi_deg * 10
-        phi_encoded = struct.unpack('>h', rest[0:2])[0]   # signed int16
-        phi_deg     = phi_encoded / 10.0
-        #print(f"[ANGLE] phi={phi_deg:.1f}° strength={strength}")
-        strength    = rest[2]
-        print(phi_deg)
-        return ('angle', (phi_deg, strength))
-
     def _parse_audio_frame(self, id_high_byte: int):
-        """
-        Parser audio framea (legacy tip).
-        SOF je već pročitan, id_high_byte je ID_H bajt framea.
-        Čita preostalih (rest_bytes - 1) bajtova.
-        """
+        """Parser audio framea. SOF pročitan, id_high_byte je ID_H."""
         ser = self._ser
 
-        # Trebamo još: ID_L(1) + podaci + EOF(2) = _rest_bytes - 1 bajtova
         remaining = ser.read(self._rest_bytes - 1)
         if len(remaining) != self._rest_bytes - 1:
             return None
 
-        # Rekonstruiraj puni rest = [ID_H, ID_L, podaci..., EOF1, EOF2]
         full_rest = bytes([id_high_byte]) + remaining
 
-        # Provjeri EOF
         if full_rest[-2] != 0xCC or full_rest[-1] != 0xDD:
-            return None      # oštećen frame
+            return None
 
-        # Raspakiraj uint16 vrijednosti (big-endian), preskoči 2B frame_id
-        n   = self.num_channels * self.samples_per_chan
-        raw = struct.unpack_from(f">{n}H", full_rest, offset=2)
-        #print(raw)
+        # Preskoči 2B frame_id, uzmi podatke (bez EOF-a)
+        return self._decode_audio(full_rest[2:-2])
+
+    def _decode_audio(self, data_bytes: bytes):
+        """Dekodira sirove bajtove u ndarray oblika (num_channels, samples_per_chan)."""
+        n = self.num_channels * self.samples_per_chan
+        expected_len = n * 2
+        if len(data_bytes) != expected_len:
+            return None
+
+        raw = struct.unpack(f">{n}H", data_bytes)
         arr = np.array(raw, dtype=np.float32)
 
         # De-interleaving: [CH0_s0, CH1_s0, ..., CH0_s1, CH1_s1, ...]

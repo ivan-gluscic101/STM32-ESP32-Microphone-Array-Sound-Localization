@@ -1,6 +1,6 @@
 Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.o: \
  ../Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.c \
- C:/Users/glusc/zavRad/Sound\ Localization/Core/CustomDriverSet/IncDriver/TwoDimSoundLoc.h \
+ C:/Users/Gluscic/STM32-ESP32-Microphone-Array-Sound-Localization/Sound\ Localization/Core/CustomDriverSet/IncDriver/TwoDimSoundLoc.h \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal.h \
  ../Core/Inc/stm32g4xx_hal_conf.h \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_rcc.h \
@@ -26,9 +26,12 @@ Core/CustomDriverSet/SrcDriver/TwoDimSoundLoc.o: \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_flash_ramfunc.h \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_pwr.h \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_pwr_ex.h \
+ ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_tim.h \
+ ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_tim_ex.h \
  ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_uart.h \
- ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_uart_ex.h
-C:/Users/glusc/zavRad/Sound\ Localization/Core/CustomDriverSet/IncDriver/TwoDimSoundLoc.h:
+ ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_uart_ex.h \
+ C:/Users/Gluscic/STM32-ESP32-Microphone-Array-Sound-Localization/Sound\ Localization/Core/CustomDriverSet/IncDriver/audio_common.h
+C:/Users/Gluscic/STM32-ESP32-Microphone-Array-Sound-Localization/Sound\ Localization/Core/CustomDriverSet/IncDriver/TwoDimSoundLoc.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal.h:
 ../Core/Inc/stm32g4xx_hal_conf.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_rcc.h:
@@ -54,5 +57,8 @@ C:/Users/glusc/zavRad/Sound\ Localization/Core/CustomDriverSet/IncDriver/TwoDimS
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_flash_ramfunc.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_pwr.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_pwr_ex.h:
+../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_tim.h:
+../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_tim_ex.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_uart.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal_uart_ex.h:
+C:/Users/Gluscic/STM32-ESP32-Microphone-Array-Sound-Localization/Sound\ Localization/Core/CustomDriverSet/IncDriver/audio_common.h:

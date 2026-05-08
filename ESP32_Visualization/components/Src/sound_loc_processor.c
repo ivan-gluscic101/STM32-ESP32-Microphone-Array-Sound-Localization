@@ -7,7 +7,6 @@
 #include "esp_log.h"
 
 #include "uart_driver.h"
-#include "audio_common.h"
 #include "web_server.h"
 
 static const char *TAG = "SOUND_LOC_PROC";

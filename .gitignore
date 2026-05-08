@@ -1,1 +1,42 @@
+# ── STM32 / Eclipse build output ──────────────────────────────────────────────
+Debug/
+Release/
+*.o
+*.elf
+*.map
+*.list
+*.d
+*.su
+*.cyclo
+subdir.mk
+makefile
+
+# ── STM32CubeIDE / Eclipse project metadata ───────────────────────────────────
+.settings/
+.cproject
+.project
+
+# ── ESP-IDF build output ──────────────────────────────────────────────────────
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
 .claude/
+
+# ── VS Code ───────────────────────────────────────────────────────────────────
+.vscode/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

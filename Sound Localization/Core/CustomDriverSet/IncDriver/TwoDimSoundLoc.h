@@ -26,10 +26,13 @@ extern "C" {
 #include "audio_common.h"
 
 /* ── Threshold pragovi za detekciju zvuka ──────────────────────────────────── */
-/* Idle šum stiže do ~2750 (min) i ~3400 (max) — pragovi moraju biti izvan  */
-/* tog raspona da se izbjegnu lažne detekcije.                               */
+/* Idle šum stiže do ~2750 (min) i ~3400 (max) — pragovi moraju biti DOVOLJNO */
+/* daleko od tog raspona da se izbjegnu lažne detekcije.                       */
+/* Stara verzija (16 kHz, single threshold=3400) je radila stabilno u Pythonu;  */
+/* sa 64 kHz i 512 sample-ova po bufferu imamo 8× više prilika za false trigger,*/
+/* pa LOW mora biti dosta niži od idle minimuma.                                */
 #define THRESHOLD_HIGH        3600
-#define THRESHOLD_LOW         2500
+#define THRESHOLD_LOW         1500   /* bilo 2500 — preblizu idle min ~2750 */
 
 /* ── Cooldown nakon detekcije ──────────────────────────────────────────────── */
 /* 1 frame = 1 half-buffer = 512 uzoraka / 64 kHz = 8 ms

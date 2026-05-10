@@ -2,20 +2,16 @@
 /**
   ******************************************************************************
   * @file    stm32g4xx_it.c
-  * @brief   Interrupt Service Routines — ISPRAVLJENO
-  ******************************************************************************
-  *
-  *  ISPRAVKA:
-  *    Queue handle preimenovan: queueXommDataHandle → queueDmaEventHandle
-  *    (jasnije ime koje opisuje svrhu)
+  * @brief   Interrupt Service Routines
   ******************************************************************************
   */
 /* USER CODE END Header */
 
 #include "main.h"
 #include "stm32g4xx_it.h"
-
 /* USER CODE BEGIN Includes */
+#include "FreeRTOS.h"
+#include "queue.h"
 #include "cmsis_os.h"
 /* USER CODE END Includes */
 
@@ -64,35 +60,45 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
-  * @brief DMA1 Channel1 — ADC half-buffer i full-buffer interrupt.
-  *
-  * Kad DMA napuni prvu polovicu buffera (HT), šaljemo 0 u queue.
-  * Kad DMA napuni drugu polovicu (TC), šaljemo 1 u queue.
-  * processTask čita queue i obrađuje odgovarajuću polovicu.
-  *
-  * SIGURNOST:
-  *   osMessagePut s timeout=0 je FreeRTOS ISR-safe (koristi xQueueSendFromISR).
-  *   Ako je queue pun, poruka se odbacuje — to znači da processTask kasni,
-  *   što se ne bi trebalo dogoditi s razdvojenim taskovima (obrada < 1 ms).
-  */
+ * @brief DMA1 Channel 1 — ADC double-buffer half/full transfer.
+ *
+ * Šalje flag u queueDmaEventHandle:
+ *   0 = prva polovica adc_buffer[] je gotova (HT interrupt)
+ *   1 = druga polovica adc_buffer[] je gotova (TC interrupt)
+ *
+ * NVIC prioritet = 5 = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY →
+ * smije koristiti xQueueSendFromISR.
+ */
 void DMA1_Channel1_IRQHandler(void)
 {
-  if (LL_DMA_IsActiveFlag_HT1(DMA1))
-  {
-      LL_DMA_ClearFlag_HT1(DMA1);
-      osMessagePut(queueDmaEventHandle, 0U, 0);   /* ping: prva polovica */
+  /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
+  BaseType_t woken = pdFALSE;
+  uint32_t   msg;
+
+  if (LL_DMA_IsActiveFlag_HT1(DMA1)) {
+    LL_DMA_ClearFlag_HT1(DMA1);
+    msg = 0u;
+    xQueueSendFromISR((QueueHandle_t)queueDmaEventHandle, &msg, &woken);
   }
-  if (LL_DMA_IsActiveFlag_TC1(DMA1))
-  {
-      LL_DMA_ClearFlag_TC1(DMA1);
-      osMessagePut(queueDmaEventHandle, 1U, 0);   /* pong: druga polovica */
+  if (LL_DMA_IsActiveFlag_TC1(DMA1)) {
+    LL_DMA_ClearFlag_TC1(DMA1);
+    msg = 1u;
+    xQueueSendFromISR((QueueHandle_t)queueDmaEventHandle, &msg, &woken);
   }
+  portYIELD_FROM_ISR(woken);
+  /* USER CODE END DMA1_Channel1_IRQn 0 */
 }
 
+/**
+ * @brief ADC1/ADC2 global interrupt — nije korišten; ostavljen prazan.
+ */
 void ADC1_2_IRQHandler(void)
 {
 }
 
+/**
+ * @brief EXTI line[15:10] — korisnička tipka (PC13).
+ */
 void EXTI15_10_IRQHandler(void)
 {
   if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_13) != RESET)
@@ -101,6 +107,9 @@ void EXTI15_10_IRQHandler(void)
   }
 }
 
+/**
+ * @brief TIM6 — FreeRTOS tick (HAL_IncTick pozvan iz HAL_TIM_PeriodElapsedCallback).
+ */
 void TIM6_DAC_IRQHandler(void)
 {
   HAL_TIM_IRQHandler(&htim6);

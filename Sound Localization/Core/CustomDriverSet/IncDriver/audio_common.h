@@ -1,55 +1,58 @@
-/*
- * audio_common.h — Zajedničke konstante za audio sustav.
- *
- * ZAŠTO OVA DATOTEKA POSTOJI:
- *   Originalno su NUM_CH, HALF_SIZE, SAMPLES_PER_CHANNEL bili definirani
- *   na 4 različita mjesta (main.c, TwoDimSoundLoc.h, EMA_FILTER.h, SMA_FILTER.h)
- *   s NEKONZISTENTNIM vrijednostima:
- *     - main.c:           SAMPLES_PER_CHANNEL = 512
- *     - TwoDimSoundLoc.h: HALF_SIZE = 256
- *
- *   To je značilo da LOC_Process obrađuje samo 256 od 512 uzoraka
- *   u half-bufferu — gubitak 50% podataka.
- *
- *   Sada je SVE na jednom mjestu. Promijeniš ovdje → promijeni se svugdje.
- */
-
 #ifndef AUDIO_COMMON_H
 #define AUDIO_COMMON_H
 
-/* ── Broj kanala (mikrofona) ──────────────────────────────────────────────── */
+/* ── Buffer layout ─────────────────────────────────────────────────────────── */
 #define NUM_CH                4
-
-/* ── Uzorci po kanalu u jednom half-bufferu ────────────────────────────────── */
-/*    MORA se podudarati s DMA konfiguracijom:
- *    FULL_BUFFER = NUM_CH * SAMPLES_PER_CHANNEL * 2
- *    DMA half-transfer interrupt se okida na FULL_BUFFER / 2 = HALF_BUFFER
- */
 #define SAMPLES_PER_CHANNEL   512
-#define HALF_SIZE             SAMPLES_PER_CHANNEL   /* alias za LOC_Process */
+#define HALF_SIZE             SAMPLES_PER_CHANNEL
+#define HALF_BUFFER           (NUM_CH * SAMPLES_PER_CHANNEL)   /* 2048 uzoraka */
+#define FULL_BUFFER           (HALF_BUFFER * 2)                /* 4096 uzoraka */
 
-/* ── Izvedene veličine buffera ────────────────────────────────────────────── */
-#define HALF_BUFFER           (NUM_CH * SAMPLES_PER_CHANNEL)   /* 2048 elemenata */
-#define FULL_BUFFER           (HALF_BUFFER * 2)                /* 4096 elemenata */
-
-/* ── Frekvencija uzorkovanja ──────────────────────────────────────────────── */
-/* TIM8 ARR=2655 → 64 kHz trigger; ADC scan mode (DISCONT disabled) →
- * svaki trigger konvertira sva 4 kanala → 64 kHz po kanalu.              */
+/* ── Vremenski parametri ───────────────────────────────────────────────────── */
+/* TIM8 ARR=2655 @ 170 MHz → okida ADC svakih 15.625 µs = 64 kHz po kanalu   */
 #define SAMPLE_RATE_HZ        64000
-#define SAMPLE_PERIOD_S       (1.0f / SAMPLE_RATE_HZ)   /* 15.625 µs */
+#define SAMPLE_PERIOD_S       (1.0f / SAMPLE_RATE_HZ)          /* 15.625 µs   */
 
-/* ── Fizikalne konstante ──────────────────────────────────────────────────── */
-#define SPEED_OF_SOUND        343.0f    /* m/s pri sobnoj temperaturi        */
-#define MIC_DIST_M            0.20f     /* razmak između mikrofona [m]       */
-#define CH_DELAY_S            0.9e-6f   /* ADC sekvencijalni channel offset  */
+/* ── ADC sekvencijalni offset ─────────────────────────────────────────────── */
+/* ADC clock = PCLK/4 = 170 MHz/4 = 42.5 MHz → perioda 23.53 ns              */
+/* Svaki kanal = 24.5 (sampling) + 12.5 (conv) = 37 ciklusa = 870.6 ns       */
+#define CH_DELAY_S            870.6e-9f
 
-/* ── Izvedene fizikalne granice ───────────────────────────────────────────── */
-/* TDOA_MAX = d/c = 0.20/343 = 583 µs = 37.3 uzoraka → koristimo 38       */
-#define TDOA_MAX_SAMPLES      38
+/* ── Akustika ──────────────────────────────────────────────────────────────── */
+#define SPEED_OF_SOUND        343.0f    /* m/s pri ~20°C */
 
-/* ── Upravljanje slanjem podataka ─────────────────────────────────────────── */
-/* 1 = šalji sirove audio podatke (valnih oblika) putem UART-a               */
-/* 0 = šalji samo kut + jakost (uštedi ~4 KB/frame i CPU)                   */
+/* ── Geometrija mikrofona — tetraedarski raspored ─────────────────────────── */
+/* Brid tetraedra = 10 cm; M1 u ishodištu koordinatnog sustava.               */
+/*                                                                              */
+/*   M1 (0,0,0) ─── M2 (10cm, 0, 0)                                           */
+/*        │                                                                     */
+/*   M3 (5cm, 8.66cm, 0)   M4 (5cm, 2.89cm, 8.16cm)                          */
+/*                                                                              */
+/* ADC redosljed: RANK1=M1(PA0), RANK2=M2(PB14), RANK3=M3(PC0), RANK4=M4(PC1)*/
+#define MIC_TETRA_EDGE        0.10f
+#define MIC_DIST_M            MIC_TETRA_EDGE  /* za 2D lokalizaciju (M1-M2)  */
+
+#define MIC1_X  0.0f
+#define MIC1_Y  0.0f
+#define MIC1_Z  0.0f
+
+#define MIC2_X  MIC_TETRA_EDGE
+#define MIC2_Y  0.0f
+#define MIC2_Z  0.0f
+
+#define MIC3_X  (MIC_TETRA_EDGE * 0.5f)
+#define MIC3_Y  (MIC_TETRA_EDGE * 0.86602540378f)
+#define MIC3_Z  0.0f
+
+#define MIC4_X  (MIC_TETRA_EDGE * 0.5f)
+#define MIC4_Y  (MIC_TETRA_EDGE * 0.28867513459f)
+#define MIC4_Z  (MIC_TETRA_EDGE * 0.81649658092f)
+
+/* ── TDOA ograničenje ─────────────────────────────────────────────────────── */
+/* Max akustički TDOA za brid 10 cm: 0.10/343 * 64000 = 18.66 uzoraka → 20  */
+#define TDOA_MAX_SAMPLES      20
+
+/* ── Slanje podataka ──────────────────────────────────────────────────────── */
 #define SEND_AUDIO_FRAMES     0
 
 #endif /* AUDIO_COMMON_H */

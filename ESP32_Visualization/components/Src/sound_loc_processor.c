@@ -12,17 +12,18 @@
 static const char *TAG = "SOUND_LOC_PROC";
 
 /*
- * State machine za parsiranje angle paketa bajt po bajt.
- * Format: [0xAA][0xBB][0x02][PHI_H][PHI_L][STR][0xCC][0xDD]
- * Ispravno sklapa paket čak i kad uart_read_bytes vrati
- * samo dio bajtova u jednom čitanju.
+ * State machine za parsiranje angle paketa — podrška za 2D i 3D
+ * Format 2D (Type 0x02): [0xAA][0xBB][0x02][PHI_H][PHI_L][STR][0xCC][0xDD]
+ * Format 3D (Type 0x03): [0xAA][0xBB][0x03][AZ_H][AZ_L][EL_H][EL_L][STR][0xCC][0xDD]
  */
 typedef enum {
     S_SOF1 = 0,
     S_SOF2,
     S_TYPE,
-    S_PHI_H,
-    S_PHI_L,
+    S_AZ_H,
+    S_AZ_L,
+    S_EL_H,
+    S_EL_L,
     S_STR,
     S_EOF1,
     S_EOF2,
@@ -36,13 +37,21 @@ static void rx_task(void *arg) {
         return;
     }
 
-    pkt_state_t state   = S_SOF1;
-    uint8_t     phi_h   = 0;
-    uint8_t     phi_l   = 0;
-    uint8_t     str_val = 0;
+    pkt_state_t state    = S_SOF1;
+    uint8_t     pkt_type = 0;
+    uint8_t     az_h     = 0;
+    uint8_t     az_l     = 0;
+    uint8_t     el_h     = 0;
+    uint8_t     el_l     = 0;
+    uint8_t     str_val  = 0;
 
+    int pkt_count = 0;
     while (1) {
         int len = uart_read_bytes(UART_PORT_NUM, data, UART_BUF_SIZE, 20 / portTICK_PERIOD_MS);
+        if (len > 0 && pkt_count == 0) {
+            ESP_LOGI(TAG, "UART prima podatke! Broj bajtova: %d", len);
+            pkt_count = 1;
+        }
 
         for (int i = 0; i < len; i++) {
             uint8_t b = data[i];
@@ -55,14 +64,23 @@ static void rx_task(void *arg) {
                     state = (b == ANGLE_PKT_SOF2) ? S_TYPE : S_SOF1;
                     break;
                 case S_TYPE:
-                    state = (b == ANGLE_PKT_TYPE) ? S_PHI_H : S_SOF1;
+                    pkt_type = b;
+                    state = (b == 0x02 || b == 0x03) ? S_AZ_H : S_SOF1;
                     break;
-                case S_PHI_H:
-                    phi_h = b;
-                    state = S_PHI_L;
+                case S_AZ_H:
+                    az_h = b;
+                    state = S_AZ_L;
                     break;
-                case S_PHI_L:
-                    phi_l = b;
+                case S_AZ_L:
+                    az_l = b;
+                    state = (pkt_type == 0x03) ? S_EL_H : S_STR;
+                    break;
+                case S_EL_H:
+                    el_h = b;
+                    state = S_EL_L;
+                    break;
+                case S_EL_L:
+                    el_l = b;
                     state = S_STR;
                     break;
                 case S_STR:
@@ -74,10 +92,12 @@ static void rx_task(void *arg) {
                     break;
                 case S_EOF2:
                     if (b == ANGLE_PKT_EOF2) {
-                        int16_t phi_tenth = (int16_t)((phi_h << 8) | phi_l);
-                        float angle = phi_tenth / 10.0f;
-                        ESP_LOGI(TAG, "Kut: %.1f deg | Jakost: %d", angle, str_val);
-                        web_server_send_data(angle, 0.0f, str_val);
+                        int16_t az_tenth = (int16_t)((az_h << 8) | az_l);
+                        int16_t el_tenth = (pkt_type == 0x03) ? (int16_t)((el_h << 8) | el_l) : 0;
+                        float azimuth = az_tenth / 10.0f;
+                        float elevation = el_tenth / 10.0f;
+                        ESP_LOGI(TAG, "Type %d | Az: %.1f° | El: %.1f° | Strength: %d", pkt_type, azimuth, elevation, str_val);
+                        web_server_send_data(azimuth, elevation, str_val);
                     }
                     state = S_SOF1;
                     break;

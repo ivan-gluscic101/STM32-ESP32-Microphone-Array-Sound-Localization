@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -28,7 +29,7 @@ static const char *INDEX_HTML =
 "background:rgba(0,0,0,.65);padding:8px 14px;border-radius:6px;pointer-events:none;}"
 "#sts{position:fixed;bottom:12px;left:12px;color:#888;font:12px monospace;}"
 "</style></head><body>"
-"<div id='hud'>Azimuth: --&deg; &nbsp; Strength: --</div>"
+"<div id='hud'>Azimuth: --&deg; | Polar: --&deg; | Strength: --</div>"
 "<div id='sts'>Connecting...</div>"
 "<script>"
 
@@ -176,13 +177,15 @@ static const char *INDEX_HTML =
 
 /* --- WebSocket --- */
 "var hud=document.getElementById('hud'),sts=document.getElementById('sts');"
+"console.log('Location host: '+location.host);"
 "var ws=new WebSocket('ws://'+location.host+'/ws');"
-"ws.onopen=function(){sts.textContent='Connected';sts.style.color='#0f0';};"
-"ws.onclose=function(){sts.textContent='Disconnected';sts.style.color='#f44';};"
+"ws.onopen=function(){console.log('WS connected');sts.textContent='Connected';sts.style.color='#0f0';};"
+"ws.onerror=function(e){console.error('WS error:',e);sts.textContent='Error: '+e;sts.style.color='#ff6';};"
+"ws.onclose=function(e){console.log('WS closed');sts.textContent='Disconnected ('+e.code+')';sts.style.color='#f44';};"
 "ws.onmessage=function(ev){"
-"try{var d=JSON.parse(ev.data);"
-"hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; &nbsp; Strength: '+d.strength;"
-"addS(d.azimuth,d.polar||0);}catch(e){}};"
+"try{console.log('Data:',ev.data);var d=JSON.parse(ev.data);"
+"hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; | Polar: '+(d.polar||0).toFixed(1)+'&deg; | Strength: '+d.strength;"
+"addS(d.azimuth,d.polar||0);}catch(e){console.error('Parse error:',e);}};"
 
 /* --- Render loop --- */
 "gl.enable(gl.DEPTH_TEST);"
@@ -212,6 +215,15 @@ static const char *INDEX_HTML =
 static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Favicon handler (avoid 404 errors)                                 */
+/* ------------------------------------------------------------------ */
+static esp_err_t favicon_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "image/x-icon");
+    httpd_resp_send(req, "", 0);
     return ESP_OK;
 }
 
@@ -308,6 +320,34 @@ void web_server_send_data(float azimuth, float polar, uint8_t strength) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Mock task za testiranje vizualizacije                              */
+/* ------------------------------------------------------------------ */
+static void mock_esp_task(void *pvParameters) {
+    // Čekamo 10 sekundi kako bismo osigurali da su WiFi i HTTP server 
+    // u potpunosti podignuti i da nema konflikta s mrežnom inicijalizacijom.
+    ESP_LOGI(TAG, "Mock test pokrenut, pauza 10s za stabilizaciju mreže...");
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    
+    ESP_LOGI(TAG, ">>> Pokrećem BESKONAČNI 3D ESP32 Mock test <<<");
+    float mock_az = 0.0f;
+    float mock_pol = -45.0f; // Počinjemo ispod horizonta
+    float pol_dir = 5.0f;    // Brzina promjene visine
+
+    while (1) {
+        ESP_LOGI(TAG, "[MOCK] 3D Signal: Azimuth=%.1f, Polar=%.1f", mock_az, mock_pol);
+        web_server_send_data(mock_az, mock_pol, 200);
+        
+        mock_az += 15.0f; // Rotira se horizontalno
+        if (mock_az >= 360.0f) mock_az = 0.0f;
+
+        mock_pol += pol_dir; // Oscilira gore-dolje (3D efekt)
+        if (mock_pol >= 60.0f || mock_pol <= -60.0f) pol_dir = -pol_dir;
+
+        vTaskDelay(pdMS_TO_TICKS(500)); // Svaki signal traje 0.5 sekundi
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Inicijalizacija servera                                             */
 /* ------------------------------------------------------------------ */
 void web_server_init(void) {
@@ -337,10 +377,21 @@ void web_server_init(void) {
         .is_websocket = true,
     };
 
+    static const httpd_uri_t favicon_uri = {
+        .uri      = "/favicon.ico",
+        .method   = HTTP_GET,
+        .handler  = favicon_get_handler,
+        .user_ctx = NULL,
+    };
+
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &root_uri);
         httpd_register_uri_handler(server, &ws_uri);
+        httpd_register_uri_handler(server, &favicon_uri);
         ESP_LOGI(TAG, "HTTP server pokrenut na portu 80");
+        
+        /* Pokreni mock test task */
+        xTaskCreate(mock_esp_task, "mock_esp_task", 4096, NULL, 5, NULL);
     } else {
         ESP_LOGE(TAG, "Greška pri pokretanju HTTP servera");
     }

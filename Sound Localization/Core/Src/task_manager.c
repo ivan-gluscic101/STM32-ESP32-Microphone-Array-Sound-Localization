@@ -1,43 +1,40 @@
-#include "task_manager.h"
-#include "uart_driver.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include <math.h>
-#include <string.h>
-
-// Ovdje dodaj headere gdje su definirane tvoje funkcije taskova
-// #include "acquisition.h"
-// #include "processing.h"
-// #include "communication.h"
-
-/* Eksterne deklaracije ako funkcije nisu u headerima */
-extern void StartACQTask(void *argument);
-extern void StartFFTTask(void *argument);
-extern void StartUARTTask(void *argument);
-
 /**
- * Privremeni testni task koji simulira rotirajući izvor zvuka sa 3D lokalizacijom
+ ******************************************************************************
+ * @file    task_manager.c
+ * @brief   Centralizirano kreiranje FreeRTOS taskova za pipeline 3D lokalizacije.
+ *
+ *  defaultTask (Idle)     — osDelay loop
+ *  ACQ_Task    (Realtime) — DMA event → memcpy half-buffer → semAcqReady
+ *  FFT_Task    (High)     — LOC3D_Process() → queueResultHandle
+ *  UART_Task   (Low)      — queueResultHandle → UART_SendAngle3DPacket()
+ *  GCC_Task    (Normal)   — rezervirano (npr. EMA filtriranje smjera)
+ ******************************************************************************
  */
-void Mock_Test_Task(void *argument) {
-    int16_t az_tenth = 0;
-    int16_t el_tenth = 0;
-    uint8_t strength = 100;
 
-    while (1) {
-        az_tenth += 50;                     // +5° po koraku
-        if (az_tenth >= 3600) az_tenth = 0;
+#include "task_manager.h"
 
-        // Simulacija promjene elevacije (0-180 stupnjeva u desetinkama)
-        el_tenth = (el_tenth + 10) % 1800;
+/* StartXxx implementacije žive u main.c — koristimo extern deklaracije
+ * umjesto dodatnog headera. Potpis je `void (void const *)` kako traži CMSIS-RTOS v1. */
+extern void StartDefaultTask(void const *argument);
+extern void StartACQTask    (void const *argument);
+extern void StartFFTTask    (void const *argument);
+extern void StartUARTTask   (void const *argument);
+extern void StartTask05     (void const *argument);
 
-        // Slanje 3D paketa (binarni format: 10 bajtova)
-        UART_SendAngle3DPacket(az_tenth, el_tenth, strength);
+void app_tasks_init(void)
+{
+    osThreadDef(defaultTask, StartDefaultTask, osPriorityIdle,     0, 128);
+    (void)osThreadCreate(osThread(defaultTask), NULL);
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz osvježavanje
-    }
-}
+    osThreadDef(ACQ_Task,    StartACQTask,     osPriorityRealtime, 0, 256);
+    (void)osThreadCreate(osThread(ACQ_Task),   NULL);
 
-void app_tasks_init(void) {
-    /* Pokretanje testnog mock taska koji simulira 3D lokalizaciju */
-    xTaskCreate(Mock_Test_Task, "MOCK", 512, NULL, 2, NULL);
+    osThreadDef(FFT_Task,    StartFFTTask,     osPriorityHigh,     0, 512);
+    (void)osThreadCreate(osThread(FFT_Task),   NULL);
+
+    osThreadDef(UART_Task,   StartUARTTask,    osPriorityLow,      0, 256);
+    (void)osThreadCreate(osThread(UART_Task),  NULL);
+
+    osThreadDef(GCC_Task,    StartTask05,      osPriorityNormal,   0, 512);
+    (void)osThreadCreate(osThread(GCC_Task),   NULL);
 }

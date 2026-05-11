@@ -64,12 +64,6 @@
 
 /* ── FreeRTOS handles ─────────────────────────────────────────────────────── */
 /* USER CODE BEGIN PV */
-osThreadId   defaultTaskHandle;
-osThreadId   ACQ_TaskHandle;
-osThreadId   UART_TaskHandle;
-osThreadId   FFT_TaskHandle;
-osThreadId   GCC_TaskHandle;
-
 osMessageQId  queueDmaEventHandle;  /* DMA ISR  → ACQ_Task  (uint32_t flag)   */
 QueueHandle_t queueResultHandle;    /* FFT_Task → UART_Task (loc3d_result_t)  */
 
@@ -80,7 +74,7 @@ osSemaphoreId semAcqReady;          /* ACQ_Task → FFT_Task                   *
 static uint16_t acq_snapshot[HALF_BUFFER];
 /* USER CODE END PV */
 
-/* ── Task prototipi ───────────────────────────────────────────────────────── */
+/* ── Task prototipi (definicije ovdje, kreiranje u task_manager.c) ────────── */
 void StartDefaultTask(void const *argument);
 void StartACQTask(void const *argument);
 void StartUARTTask(void const *argument);
@@ -124,27 +118,12 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* USER CODE BEGIN RTOS_THREADS */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityIdle,     0, 128);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
-
-  osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime,      0, 256);
-  ACQ_TaskHandle  = osThreadCreate(osThread(ACQ_Task),  NULL);
-
-//  osThreadDef(UART_Task, StartUARTTask, osPriorityLow,           0, 256);
-//  UART_TaskHandle = osThreadCreate(osThread(UART_Task), NULL);
-
-  osThreadDef(FFT_Task,  StartFFTTask,  osPriorityHigh,          0, 512);
-  FFT_TaskHandle  = osThreadCreate(osThread(FFT_Task),  NULL);
-
-  osThreadDef(GCC_Task,  StartTask05,   osPriorityNormal,        0, 512);
-  GCC_TaskHandle  = osThreadCreate(osThread(GCC_Task),  NULL);
+  /* Kreiranje svih taskova centralizirano u task_manager.c. */
+  app_tasks_init();
   /* USER CODE END RTOS_THREADS */
 
   BSP_LED_Init(LED_GREEN);
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
-
-  /* Testiranje: pokrenuti mock task koji simulira zvučni izvor */
-  app_tasks_init();
 
   osKernelStart();
   while (1) {}

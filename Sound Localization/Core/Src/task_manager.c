@@ -1,45 +1,43 @@
 #include "task_manager.h"
 #include "uart_driver.h"
-#include <stdio.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#include <math.h>
 #include <string.h>
 
+// Ovdje dodaj headere gdje su definirane tvoje funkcije taskova
+// #include "acquisition.h"
+// #include "processing.h"
+// #include "communication.h"
+
 /* Eksterne deklaracije ako funkcije nisu u headerima */
-extern void ACQ_Task(void *argument) __attribute__((weak));
-extern void FFT_Task(void *argument) __attribute__((weak));
-extern void UART_Task(void *argument) __attribute__((weak));
+extern void StartACQTask(void *argument);
+extern void StartFFTTask(void *argument);
+extern void StartUARTTask(void *argument);
 
 /**
- * Testni task koji simulira rotirajući zvučni izvor sa 3D kutovima
- * Šalje binarni format: [0xAA][0xBB][0x03][AZ_H][AZ_L][EL_H][EL_L][STR][0xCC][0xDD]
+ * Privremeni testni task koji simulira rotirajući izvor zvuka sa 3D lokalizacijom
  */
 void Mock_Test_Task(void *argument) {
-    float mock_azimuth = 0.0f;
-    float mock_elevation = 30.0f;  /* Inicijalna elevacija */
-    uint8_t mock_strength = 180;
-    uint32_t start_time = xTaskGetTickCount();
+    int16_t az_tenth = 0;
+    int16_t el_tenth = 0;
+    uint8_t strength = 100;
 
-    /* Testira se 60 sekundi */
-    while ((xTaskGetTickCount() - start_time) < pdMS_TO_TICKS(60000)) {
-        mock_azimuth += 10.0f;
-        if (mock_azimuth >= 360.0f) mock_azimuth = 0.0f;
+    while (1) {
+        az_tenth += 50;                     // +5° po koraku
+        if (az_tenth >= 3600) az_tenth = 0;
 
-        /* Elevacija oscilira između -45 i +45 stupnjeva */
-        mock_elevation = 45.0f * sinf(mock_azimuth * 3.14159f / 180.0f);
+        // Simulacija promjene elevacije (0-180 stupnjeva u desetinkama)
+        el_tenth = (el_tenth + 10) % 1800;
 
-        /* Konverzija u desetine stupnja (za protokol) */
-        int16_t az_tenth = (int16_t)(mock_azimuth * 10.0f);
-        int16_t el_tenth = (int16_t)(mock_elevation * 10.0f);
+        // Slanje 3D paketa (binarni format: 10 bajtova)
+        UART_SendAngle3DPacket(az_tenth, el_tenth, strength);
 
-        /* Slanje binarnog 3D paketa na UART4 */
-        UART_SendAngle3DPacket(az_tenth, el_tenth, mock_strength);
-
-        vTaskDelay(pdMS_TO_TICKS(200));  /* 5 Hz osvježavanje */
+        vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz osvježavanje
     }
-
-    vTaskDelete(NULL);
 }
 
 void app_tasks_init(void) {
-    /* Pokretanje testnog taska s visokim prioritetom da budemo sigurni da radi */
-    xTaskCreate(Mock_Test_Task, "MOCK_TEST", 512, NULL, 6, NULL);
+    /* Pokretanje testnog mock taska koji simulira 3D lokalizaciju */
+    xTaskCreate(Mock_Test_Task, "MOCK", 512, NULL, 2, NULL);
 }

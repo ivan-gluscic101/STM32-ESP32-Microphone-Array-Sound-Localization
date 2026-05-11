@@ -94,7 +94,7 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
-
+  
   HAL_Init();
   SystemClock_Config();
 
@@ -130,8 +130,8 @@ int main(void)
   osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime,      0, 256);
   ACQ_TaskHandle  = osThreadCreate(osThread(ACQ_Task),  NULL);
 
-  osThreadDef(UART_Task, StartUARTTask, osPriorityLow,           0, 256);
-  UART_TaskHandle = osThreadCreate(osThread(UART_Task), NULL);
+//  osThreadDef(UART_Task, StartUARTTask, osPriorityLow,           0, 256);
+//  UART_TaskHandle = osThreadCreate(osThread(UART_Task), NULL);
 
   osThreadDef(FFT_Task,  StartFFTTask,  osPriorityHigh,          0, 512);
   FFT_TaskHandle  = osThreadCreate(osThread(FFT_Task),  NULL);

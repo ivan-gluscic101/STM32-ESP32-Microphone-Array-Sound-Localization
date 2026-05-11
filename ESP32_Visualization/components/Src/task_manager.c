@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Eksterna referenca na UART handle definiran u usart.c */
+extern UART_HandleTypeDef huart1;
+
 // Ovdje dodaj headere gdje su definirane tvoje funkcije taskova
 // #include "acquisition.h"
 // #include "processing.h"
@@ -21,7 +24,8 @@ void Mock_Test_Task(void *argument) {
     float mock_azimuth = 0.0f;
     uint32_t start_time = xTaskGetTickCount();
 
-    while (1) {
+    // Radi samo prvih 10 sekundi (10000 ms)
+    while ((xTaskGetTickCount() - start_time) < pdMS_TO_TICKS(10000)) {
         mock_azimuth += 5.0f;
         if (mock_azimuth >= 360.0f) mock_azimuth = 0.0f;
 
@@ -33,6 +37,8 @@ void Mock_Test_Task(void *argument) {
 
         vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz osvježavanje
     }
+
+    vTaskDelete(NULL); // Samouništenje nakon 10 sekundi
 }
 
 void app_tasks_init(void) {

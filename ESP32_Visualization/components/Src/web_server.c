@@ -320,34 +320,6 @@ void web_server_send_data(float azimuth, float polar, uint8_t strength) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Mock task za testiranje vizualizacije                              */
-/* ------------------------------------------------------------------ */
-static void mock_esp_task(void *pvParameters) {
-    // Čekamo 10 sekundi kako bismo osigurali da su WiFi i HTTP server 
-    // u potpunosti podignuti i da nema konflikta s mrežnom inicijalizacijom.
-    ESP_LOGI(TAG, "Mock test pokrenut, pauza 10s za stabilizaciju mreže...");
-    vTaskDelay(pdMS_TO_TICKS(10000));
-    
-    ESP_LOGI(TAG, ">>> Pokrećem BESKONAČNI 3D ESP32 Mock test <<<");
-    float mock_az = 0.0f;
-    float mock_pol = -45.0f; // Počinjemo ispod horizonta
-    float pol_dir = 5.0f;    // Brzina promjene visine
-
-    while (1) {
-        ESP_LOGI(TAG, "[MOCK] 3D Signal: Azimuth=%.1f, Polar=%.1f", mock_az, mock_pol);
-        web_server_send_data(mock_az, mock_pol, 200);
-        
-        mock_az += 15.0f; // Rotira se horizontalno
-        if (mock_az >= 360.0f) mock_az = 0.0f;
-
-        mock_pol += pol_dir; // Oscilira gore-dolje (3D efekt)
-        if (mock_pol >= 60.0f || mock_pol <= -60.0f) pol_dir = -pol_dir;
-
-        vTaskDelay(pdMS_TO_TICKS(500)); // Svaki signal traje 0.5 sekundi
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /*  Inicijalizacija servera                                             */
 /* ------------------------------------------------------------------ */
 void web_server_init(void) {
@@ -389,9 +361,6 @@ void web_server_init(void) {
         httpd_register_uri_handler(server, &ws_uri);
         httpd_register_uri_handler(server, &favicon_uri);
         ESP_LOGI(TAG, "HTTP server pokrenut na portu 80");
-        
-        /* Pokreni mock test task */
-        xTaskCreate(mock_esp_task, "mock_esp_task", 4096, NULL, 5, NULL);
     } else {
         ESP_LOGE(TAG, "Greška pri pokretanju HTTP servera");
     }

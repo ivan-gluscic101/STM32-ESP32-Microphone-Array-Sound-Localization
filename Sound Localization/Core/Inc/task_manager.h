@@ -6,8 +6,8 @@
 /**
  * @brief Kreira sve aplikacijske FreeRTOS taskove (ACQ, FFT, UART, GCC, default).
  *
- * Mora se pozvati NAKON što su queue-i (queueDmaEventHandle, queueResultHandle)
- * i semafori (semAcqReady) već stvoreni u main(), a PRIJE osKernelStart().
+ * Mora se pozvati NAKON što su queue-i (queueDmaEventHandle, queueSnapshotHandle,
+ * queueResultHandle) već stvoreni u main(), a PRIJE osKernelStart().
  */
 void app_tasks_init(void);
 

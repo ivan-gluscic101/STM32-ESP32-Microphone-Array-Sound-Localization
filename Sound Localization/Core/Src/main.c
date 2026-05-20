@@ -10,12 +10,15 @@
   *    │  xQueueSendFromISR → queueDmaEventHandle (flag: 0=prva pol., 1=druga)
   *    ▼
   *  ACQ_Task [Realtime]
-  *    │  memcpy half-buffer → acq_snapshot[]
-  *    │  osSemaphoreRelease → semAcqReady
+  *    │  memcpy half-buffer → acq_snapshot[write_idx]  (dvostruki bafer)
+  *    │  xQueueOverwrite → queueSnapshotHandle (uint8_t indeks)
+  *    │  write_idx ^= 1  (naizmjenično 0↔1)
   *    ▼
   *  FFT_Task [High]
-  *    │  LOC3D_Process(acq_snapshot) → GCC + 3D smjer (~1.5 ms @ 170 MHz FPU)
-  *    │  osMessagePut → queueResultHandle (pointer na statički result)
+  *    │  xQueueReceive → read_idx
+  *    │  shift+append → sliding_buf (1024 frejma = 16 ms zvuka)
+  *    │  LOC3D_Process × 3 prozora (offset 0/256/512) → GCC + 3D smjer (~4.5 ms)
+  *    │  xQueueSend → queueResultHandle (loc3d_result_t po vrijednosti)
   *    ▼
   *  UART_Task [Low]
   *    │  UART_SendAngle3DPacket → 10 B @ 921600 baud ≈ 0.1 ms
@@ -24,8 +27,8 @@
   *
   * ── Timing budget ───────────────────────────────────────────────────────────
   *  Half-buffer period = 512 uzoraka / 64 kHz = 8 ms
-  *  Obrada: memcpy (~12 µs) + GCC × 3 (~1.5 ms) + UART (~0.1 ms) ≈ 1.6 ms
-  *  Margina: 8 ms − 1.6 ms = 6.4 ms → bez gubitka podataka
+  *  Obrada: memcpy (~22 µs) + 3 × LOC3D_Process (~4.5 ms) + UART (~0.3 ms) ≈ 5 ms
+  *  Margina: 8 ms − 5 ms = 3 ms → bez gubitka podataka, uz overhead i preempcije
   *
   * ── Stack analiza ───────────────────────────────────────────────────────────
   *  defaultTask:  128 words (512 B) — osDelay loop, OK
@@ -65,13 +68,23 @@
 /* ── FreeRTOS handles ─────────────────────────────────────────────────────── */
 /* USER CODE BEGIN PV */
 osMessageQId  queueDmaEventHandle;  /* DMA ISR  → ACQ_Task  (uint32_t flag)   */
+QueueHandle_t queueSnapshotHandle;  /* ACQ_Task → FFT_Task  (uint8_t indeks)  */
 QueueHandle_t queueResultHandle;    /* FFT_Task → UART_Task (loc3d_result_t)  */
 
-osSemaphoreId semAcqReady;          /* ACQ_Task → FFT_Task                   */
+/* Dvostruki buffer — ACQ_Task upisuje indeks 0 ili 1 naizmjenično,
+ * FFT_Task čita iz buffera čiji je indeks dobio kroz queue.
+ * Dok FFT_Task čita buffer[i], ACQ_Task upisuje u buffer[1-i] → nema race-a.
+ * 2 × 2048 × 2 B = 8 KB u BSS-u. */
+static uint16_t acq_snapshot[2][HALF_BUFFER];
 
-/* Half-buffer kopija — ACQ_Task piše, FFT_Task čita.
- * 2048 × 2 B = 4 KB u BSS-u (ne na stacku). */
-static uint16_t acq_snapshot[HALF_BUFFER];
+/* Sliding window buffer — drži [prethodni half | trenutni half] = 1024 frejma
+ * = 16 ms zvuka. FFT_Task ga sklapa svakim novim DMA eventom i pokreće
+ * lokalizaciju na 3 prozora po 512 frejmova (offset 0, 256, 512). Time je
+ * pljesak koji padne na granicu dva DMA bloka uhvaćen u srednjem prozoru.
+ *
+ * Vlasništvo: pripada isključivo FFT_Task-u → nema concurrency problema.
+ * 2 × 2048 × 2 B = 8 KB u BSS-u. */
+static uint16_t sliding_buf[2 * HALF_BUFFER];
 /* USER CODE END PV */
 
 /* ── Task prototipi (definicije ovdje, kreiranje u task_manager.c) ────────── */
@@ -102,18 +115,20 @@ int main(void)
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  osSemaphoreDef(semAcqReady);
-  semAcqReady = osSemaphoreCreate(osSemaphore(semAcqReady), 1);
-  osSemaphoreWait(semAcqReady, 0);   /* odmah preuzmi token → FFT_Task blokira */
+  /* Semafor više nije potreban — sinkronizacija ide kroz queueSnapshotHandle. */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_QUEUES */
   osMessageQDef(queueDmaEvent, 8, uint32_t);
   queueDmaEventHandle = osMessageCreate(osMessageQ(queueDmaEvent), NULL);
 
-  /* Result queue: prosljeđuje cijeli loc3d_result_t (6 B) po vrijednosti.   *
-   * FreeRTOS queue obavlja memcpy unutar xQueueSend/Receive → nema race-a   *
-   * između FFT_Task i UART_Task, čak i pri preempciji.                      */
+  /* Snapshot queue: ACQ_Task šalje indeks buffera (0 ili 1) po kopiranju.
+   * Dubina 1 — ako FFT_Task kasni, stari indeks se odbacuje i šalje novi
+   * kako bismo uvijek obrađivali najsvježije podatke. */
+  queueSnapshotHandle = xQueueCreate(1, sizeof(uint8_t));
+
+  /* Result queue: prosljeđuje cijeli loc3d_result_t po vrijednosti.
+   * FreeRTOS queue obavlja memcpy → nema race-a između FFT i UART taska. */
   queueResultHandle = xQueueCreate(4, sizeof(loc3d_result_t));
   /* USER CODE END RTOS_QUEUES */
 
@@ -137,12 +152,20 @@ void StartDefaultTask(void const *argument)
 }
 
 /**
- * ACQ_Task — čeka DMA event, kopira half-buffer, signalizira FFT_Task.
- * Prioritet Realtime osigurava da se kopija dogodi ODMAH — DMA ne smije
- * prepisati half-buffer dok ga kopiramo (kopija traje ~12 µs, margina ~8 ms).
+ * ACQ_Task — čeka DMA event, kopira half-buffer u jedan od dva snapshot buffera,
+ * zatim šalje indeks tog buffera FFT_Task-u kroz queue.
+ *
+ * Naizmjenično koristi indeks 0 i 1: dok FFT_Task obrađuje buffer[i],
+ * ACQ_Task upisuje u buffer[1-i] — nema race conditiona.
+ *
+ * Ako FFT_Task kasni, xQueueOverwrite zamjenjuje stari indeks novim
+ * kako bi FFT uvijek radio s najsvježijim podacima (preskačemo okvire
+ * umjesto čekanja i rada s ustajalim podacima).
  */
 void StartACQTask(void const *argument)
 {
+  uint8_t write_idx = 0;
+
   for (;;) {
     osEvent evt = osMessageGet(queueDmaEventHandle, osWaitForever);
     if (evt.status == osEventMessage) {
@@ -152,25 +175,64 @@ void StartACQTask(void const *argument)
       const uint16_t *src = (flag == 0u)
                             ? &adc_buffer[0]
                             : &adc_buffer[HALF_BUFFER];
-      memcpy(acq_snapshot, src, HALF_BUFFER * sizeof(uint16_t));
-      osSemaphoreRelease(semAcqReady);
+      memcpy(acq_snapshot[write_idx], src, HALF_BUFFER * sizeof(uint16_t));
+
+      /* xQueueOverwrite: ne blokira i nikad ne puni queue — uvijek šalje
+       * najnoviji indeks čak i ako FFT_Task još nije uzeo prethodni. */
+      xQueueOverwrite(queueSnapshotHandle, &write_idx);
+
+      write_idx ^= 1u;   /* izmjenično 0 → 1 → 0 → … */
     }
   }
 }
 
 /**
- * FFT_Task — GCC + 3D lokalizacija.
- * xQueueSend kopira loc3d_result_t (6 B) u queue → result može biti lokalna varijabla.
+ * FFT_Task — sliding-window GCC + 3D lokalizacija.
+ *
+ * Strategija: pljesak ili kratki transient može pasti na granicu dva uzastopna
+ * DMA half-buffera. Ako analiziramo samo 512 svježih frejmova, transient
+ * razdvojen 50/50 daje slabu energiju u oba bloka pa silence-gate može propustiti
+ * detekciju. Rješenje: drži posljednja 1024 frejma u `sliding_buf` i analiziraj
+ * 3 prozora po 512 frejmova s offsetom 0 / 256 / 512.
+ *
+ *   sliding_buf layout (po DMA eventu):
+ *     [ prethodnih 512 frejmova | novih 512 frejmova ]
+ *     ▲              ▲              ▲
+ *     offset 0       offset 256     offset 512
+ *
+ * Svaki uzorak je tako analiziran u barem 2 prozora — pljesak ne može
+ * "promaknuti" između njih.
+ *
+ * Prvi DMA event nakon starta: prethodna polovica je nule → samo prozor
+ * offset=512 daje smislen rezultat (silence-gate odbije ostala dva).
  */
 void StartFFTTask(void const *argument)
 {
   loc3d_result_t result;
+  uint8_t read_idx;
 
   for (;;) {
-    osSemaphoreWait(semAcqReady, osWaitForever);
+    if (xQueueReceive(queueSnapshotHandle, &read_idx, portMAX_DELAY) == pdTRUE) {
+      /* Shift: stara "druga polovica" postaje nova "prva polovica" */
+      memcpy(&sliding_buf[0],
+             &sliding_buf[HALF_BUFFER],
+             HALF_BUFFER * sizeof(uint16_t));
+      /* Append: najsvježiji half u drugu polovicu */
+      memcpy(&sliding_buf[HALF_BUFFER],
+             acq_snapshot[read_idx],
+             HALF_BUFFER * sizeof(uint16_t));
 
-    if (LOC3D_Process(acq_snapshot, &result)) {
-      xQueueSend(queueResultHandle, &result, 0);
+      /* Tri prozora s 50% preklapanjem (offsetovi u frejmovima): */
+      static const uint32_t offsets[3] = {
+          0u,
+          SAMPLES_PER_CHANNEL / 2u,
+          SAMPLES_PER_CHANNEL
+      };
+      for (int i = 0; i < 3; i++) {
+        if (LOC3D_Process(sliding_buf, offsets[i], &result)) {
+          xQueueSend(queueResultHandle, &result, 0);
+        }
+      }
     }
   }
 }

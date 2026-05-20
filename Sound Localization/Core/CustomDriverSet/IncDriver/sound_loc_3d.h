@@ -27,12 +27,19 @@ typedef struct {
 } loc3d_result_t;
 
 /*
- * LOC3D_Process — obradi jedan half-buffer i vrati 3D smjer.
+ * LOC3D_Process — obradi prozor od SAMPLES_PER_CHANNEL frejmova počevši od
+ * `frame_offset` unutar `buf` i vrati 3D smjer.
  *
- * @param buf  pokazivač na kopiju half-buffera (read-only, interleaved)
- * @param out  rezultat lokalizacije (samo validan ako je povratna vrijednost 1)
- * @return     1 = valjan smjer izračunat, 0 = tišina / cooldown / nekonzistentni TDOA
+ * Sliding window: pozivatelj može pozvati funkciju više puta na različitim
+ * offsetima unutar istog buffera kako bi uhvatio transient (npr. pljesak) koji
+ * leži na granici dva DMA half-buffera.
+ *
+ * @param buf           interleaved [s*NUM_CH + ch] uint16_t buffer (read-only)
+ * @param frame_offset  početni frejm prozora unutar buf
+ * @param out           rezultat lokalizacije (validan samo ako je povrat 1)
+ * @return              1 = valjan smjer izračunat, 0 = tišina / nekonzistentni TDOA
  */
-uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out);
+uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
+                      loc3d_result_t *out);
 
 #endif /* SOUND_LOC_3D_H */

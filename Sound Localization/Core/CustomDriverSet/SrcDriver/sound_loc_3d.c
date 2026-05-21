@@ -5,7 +5,12 @@
 /* Minimalni RMS (nakon DC uklanjanja) koji aktivira lokalizaciju.
  * Idle šum tipično < 10 LSB RMS; tihi pljesak iz 2 m ~20-40 LSB; glasni ~100-500.
  * Prag se primjenjuje na MAX RMS po svim kanalima — ne ovisi o smjeru izvora. */
-#define MIN_RMS_THRESHOLD     25.0f
+#define MIN_RMS_THRESHOLD     100.0f
+
+/* Minimalna visina vrha normalizirane korelacije za prihvaćanje TDOA-a.
+ * Pravi zvuk tipično daje 0.5–0.9; razmazan/šumovit signal 0.1–0.3.
+ * Provjerava se NAJSLABIJI par — sve 3 korelacije moraju imati jasan vrh. */
+#define MIN_PEAK_QUALITY      0.40f
 
 /* ── Statički kanalni nizovi — NE smiju biti na stacku ────────────────────── */
 /* Svaki = 512 × 4 B = 2 KB. Ukupno 8 KB u BSS segmentu (SRAM, uvijek prisutan).*/
@@ -34,10 +39,20 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
     if (rms_max < MIN_RMS_THRESHOLD) return 0;
 
     /* ── Korak 3: GCC lags za 3 para (M1 = referentni mikrofon) ──────────── */
-    /* Sub-sample (float) lag iz paraboličke interpolacije vrha korelacije.   */
-    float lag12 = GCC_ComputeLag(s_ch0, s_ch1);
-    float lag13 = GCC_ComputeLag(s_ch0, s_ch2);
-    float lag14 = GCC_ComputeLag(s_ch0, s_ch3);
+    /* Sub-sample (float) lag + visina vrha (mjera kvalitete) za svaki par.   */
+    float peak12, peak13, peak14;
+    float lag12 = GCC_ComputeLag(s_ch0, s_ch1, &peak12);
+    float lag13 = GCC_ComputeLag(s_ch0, s_ch2, &peak13);
+    float lag14 = GCC_ComputeLag(s_ch0, s_ch3, &peak14);
+
+    /* Najslabiji par diktira pouzdanost — ako bilo koja korelacija nema     */
+    /* jasan vrh, smjer izračunat iz nje je nepouzdan. U tišini su sve tri  */
+    /* korelacije razmazane (peak ~0.1-0.3) pa ovaj test eliminira većinu   */
+    /* lažnih detekcija prije nego se uopće dođe do TDOA→smjer rješavanja. */
+    float peak_min = peak12;
+    if (peak13 < peak_min) peak_min = peak13;
+    if (peak14 < peak_min) peak_min = peak14;
+    if (peak_min < MIN_PEAK_QUALITY) return 0;
 
     /* ── Korak 4: Pretvorba laga u akustički TDOA [s] ─────────────────────── */
     /*                                                                          */
@@ -72,11 +87,17 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
     float uy = (tau13 * c - MIC3_X * ux) / MIC3_Y;
     float uz = (tau14 * c - MIC4_X * ux - MIC4_Y * uy) / MIC4_Z;
 
-    /* ── Korak 6: Fizikalna validacija |u| ≤ 1 ───────────────────────────── */
+    /* ── Korak 6: Fizikalna validacija |u| ≈ 1 ───────────────────────────── */
     /* Za zvuk koji dolazi iz beskonačnosti |u| = 1 (jedinični vektor).       */
-    /* |u| > 1 znači nekonzistentne TDOA vrijednosti (šum ili near-field).   */
+    /*                                                                          */
+    /* Gornja granica  |u| > 1.05  → nekonzistentne TDOA (near-field, kliping).*/
+    /* Donja granica   |u| < 0.80  → tri TDOA-a ne pripadaju nijednom realnom  */
+    /*   smjeru. Tipično za pozadinski šum (ventilator, brujanje, klima):      */
+    /*   korelacija je slaba pa parabolička interpolacija pokupi nasumične     */
+    /*   vrhove. Mjerenja u tišini su pokazivala |u| ≈ 0.5-0.7 → 99% lažnih   */
+    /*   detekcija prošlo je samo zato što je nedostajao ovaj test.            */
     float mag2 = ux * ux + uy * uy + uz * uz;
-    if (mag2 > 1.10f) return 0;   /* 1.05² ≈ 1.10 — 5% slack za kvantizaciju */
+    if (mag2 > 1.10f || mag2 < 0.64f) return 0;   /* |u| ∈ [0.80, 1.05] */
 
     /* ── Korak 7: Kutovi iz smjernog vektora ─────────────────────────────── */
     float az_rad = atan2f(uy, ux);

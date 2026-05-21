@@ -29,6 +29,8 @@ typedef enum {
     S_EOF2,
 } pkt_state_t;
 
+#define LINE_BUF_SIZE 160
+
 static void rx_task(void *arg) {
     uint8_t *data = (uint8_t *) malloc(UART_BUF_SIZE);
     if (data == NULL) {
@@ -45,6 +47,9 @@ static void rx_task(void *arg) {
     uint8_t     el_l     = 0;
     uint8_t     str_val  = 0;
 
+    static char line_buf[LINE_BUF_SIZE];
+    size_t      line_idx = 0;
+
     int pkt_count = 0;
     while (1) {
         int len = uart_read_bytes(UART_PORT_NUM, data, UART_BUF_SIZE, 20 / portTICK_PERIOD_MS);
@@ -58,7 +63,20 @@ static void rx_task(void *arg) {
 
             switch (state) {
                 case S_SOF1:
-                    if (b == ANGLE_PKT_SOF1) state = S_SOF2;
+                    if (b == ANGLE_PKT_SOF1) {
+                        line_idx = 0;
+                        state = S_SOF2;
+                    } else if (b == '\n') {
+                        line_buf[line_idx] = '\0';
+                        if (line_idx > 0) {
+                            ESP_LOGI(TAG, "%s", line_buf);
+                        }
+                        line_idx = 0;
+                    } else if (b != '\r' && b >= 0x20 && b <= 0x7E) {
+                        if (line_idx < LINE_BUF_SIZE - 1) {
+                            line_buf[line_idx++] = (char)b;
+                        }
+                    }
                     break;
                 case S_SOF2:
                     state = (b == ANGLE_PKT_SOF2) ? S_TYPE : S_SOF1;

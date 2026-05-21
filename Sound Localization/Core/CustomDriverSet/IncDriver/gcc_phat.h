@@ -37,8 +37,14 @@ void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
  * Normalizirana križna korelacija s paraboličkom interpolacijom vrha.
  * Vraća sub-sample lag u [-TDOA_MAX, +TDOA_MAX] (float).
  * Pozitivni lag = ref vodi sig (ref dolazi prije sig u prostoru).
+ *
+ * Ako `out_peak` nije NULL, u njega se upisuje normalizirana vrijednost vrha
+ * korelacije (raspon -1..+1). Mjera kvalitete:
+ *   > 0.5  → jasan vrh (pravi zvuk)
+ *   0.2..0.5 → slab/razmazan vrh (slabi signal ili reverberacija)
+ *   < 0.2  → nema koherentnog signala (tipično tišina/šum)
  */
-float GCC_ComputeLag(const float *ref, const float *sig);
+float GCC_ComputeLag(const float *ref, const float *sig, float *out_peak);
 
 /* RMS jednog kanala (SAMPLES_PER_CHANNEL uzoraka, DC već uklonjen). */
 float GCC_RMS(const float *ch);

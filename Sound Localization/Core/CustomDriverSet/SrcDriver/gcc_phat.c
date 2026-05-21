@@ -39,7 +39,7 @@ float GCC_RMS(const float *ch)
     return sqrtf(acc / (float)SAMPLES_PER_CHANNEL);
 }
 
-float GCC_ComputeLag(const float *ref, const float *sig)
+float GCC_ComputeLag(const float *ref, const float *sig, float *out_peak)
 {
     /* Globalna normalizacija: e_ref × e_sig (obračunato jednom za sve lagove).
      * Za lagove << N greška je < 4%, prihvatljivo za detekciju vrha. */
@@ -49,7 +49,10 @@ float GCC_ComputeLag(const float *ref, const float *sig)
         e_sig += sig[s] * sig[s];
     }
     float norm = sqrtf(e_ref * e_sig);
-    if (norm < 1e-6f) return 0.0f;   /* oba kanala tiha */
+    if (norm < 1e-6f) {
+        if (out_peak) *out_peak = 0.0f;
+        return 0.0f;
+    }
 
     /* Prolaz 1: izračunaj korelacije za sve lagove i pohrani ih.
      * Indeks u polju: i = lag + TDOA_MAX_SAMPLES  (raspon 0 … 2×TDOA_MAX_SAMPLES)
@@ -75,6 +78,8 @@ float GCC_ComputeLag(const float *ref, const float *sig)
             best_idx = i;
         }
     }
+
+    if (out_peak) *out_peak = best_val;
 
     /* Prolaz 2: parabolička interpolacija oko vrha za sub-sample preciznost.
      * Parabola kroz tri točke:

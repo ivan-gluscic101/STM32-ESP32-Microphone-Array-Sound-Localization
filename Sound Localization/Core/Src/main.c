@@ -63,6 +63,7 @@
 #include "sound_loc_3d.h"
 #include "task_manager.h"
 #include <string.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* ── FreeRTOS handles ─────────────────────────────────────────────────────── */
@@ -253,11 +254,44 @@ void StartUARTTask(void const *argument)
 }
 
 /**
- * GCC_Task — rezervirano (npr. za EMA glađenje kuta ili budući 3D prikaz).
+ * GCC_Task — periodično šalje FreeRTOS runtime stats kroz UART4.
+ * Čeka 3 s pri pokretanju da taskovi nakupe mjerljivo CPU vrijeme,
+ * zatim ispisuje snapshot svakih 10 s.
  */
 void StartTask05(void const *argument)
 {
-  for (;;) { osDelay(10); }
+  static TaskStatus_t tasks[10];
+  static char line[64];
+  osDelay(3000);
+  for (;;) {
+    /* NE koristimo pulTotalRunTime iz uxTaskGetSystemState — to je trenutni    */
+    /* snapshot DWT/170 brojača koji wrappa svakih ~25 s. Umjesto toga,         */
+    /* sumiramo ulRunTimeCounter svih taskova → suma = ukupno CPU vrijeme od   */
+    /* boota (akumulirano kroz context switcheve, ispravno do wrapa za ~71 min)*/
+    UBaseType_t n = uxTaskGetSystemState(tasks, 10, NULL);
+
+    uint64_t total = 0;
+    for (UBaseType_t i = 0; i < n; i++) {
+      total += tasks[i].ulRunTimeCounter;
+    }
+    if (total == 0) {
+      osDelay(10000);
+      continue;
+    }
+
+    UART_SendString("\r\nTask             CPU (us)   CPU%\r\n");
+    UART_SendString("-----------------------------------\r\n");
+    for (UBaseType_t i = 0; i < n; i++) {
+      uint32_t pct = (uint32_t)(((uint64_t)tasks[i].ulRunTimeCounter * 100ULL) / total);
+      snprintf(line, sizeof(line), "%-16s %9lu   %3lu%%\r\n",
+               tasks[i].pcTaskName,
+               tasks[i].ulRunTimeCounter,
+               pct);
+      UART_SendString(line);
+    }
+    UART_SendString("-----------------------------------\r\n");
+    osDelay(10000);
+  }
 }
 
 /* ── Sistemski callback-i i pomoćne funkcije ─────────────────────────────── */

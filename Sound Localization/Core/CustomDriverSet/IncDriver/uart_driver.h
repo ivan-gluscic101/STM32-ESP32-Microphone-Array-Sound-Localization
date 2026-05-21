@@ -27,6 +27,7 @@ typedef struct {
 } uart_msg_t;
 
 void Custom_UART4_Init(void);
+void UART_SendString(const char *str);
 void UART_SendFrame(const uint16_t *buf, uint32_t samples_per_ch, uint16_t fid);
 void UART_SendAnglePacket(int16_t phi_tenth_deg, uint8_t strength);
 

@@ -50,6 +50,7 @@
 /* Ensure definitions are only used by the compiler, and not by the assembler. */
 #if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
   #include <stdint.h>
+  #include "stm32g4xx.h"
   extern uint32_t SystemCoreClock;
 #endif
 #define configENABLE_FPU                         1
@@ -136,6 +137,18 @@ standard names. */
 #define xPortSysTickHandler SysTick_Handler
 
 /* USER CODE BEGIN Defines */
+#define configUSE_TRACE_FACILITY                 1
+#define configGENERATE_RUN_TIME_STATS            1
+#define configUSE_STATS_FORMATTING_FUNCTIONS     1
+
+/* DWT cycle counter kao izvor timestamps-a za runtime stats.
+ * Na 170 MHz wrapa se svakih ~25 s — dovoljno za debug snapshot. */
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() do {          \
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;            \
+    DWT->CYCCNT = 0u;                                           \
+    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;                      \
+} while(0)
+#define portGET_RUN_TIME_COUNTER_VALUE()         (DWT->CYCCNT / 170u)
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

@@ -26,6 +26,7 @@ typedef struct {
     uint8_t  _pad;
 } loc3d_result_t;
 
+
 /*
  * LOC3D_Process — obradi prozor od SAMPLES_PER_CHANNEL frejmova počevši od
  * `frame_offset` unutar `buf` i vrati 3D smjer.

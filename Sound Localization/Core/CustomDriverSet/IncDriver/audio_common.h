@@ -28,7 +28,7 @@
 /*        │                                                                     */
 /*   M3 (5cm, 8.66cm, 0)   M4 (5cm, 2.89cm, 8.16cm)                          */
 /*                                                                              */
-/* ADC redosljed: RANK1=M1(PA0), RANK2=M2(PB14), RANK3=M3(PC0), RANK4=M4(PC1)*/
+/* ADC redosljed: RANK1=M1(PA0), RANK2=M2(PA1),  RANK3=M3(PC0), RANK4=M4(PC1)*/
 #define MIC_TETRA_EDGE        0.10f
 #define MIC_DIST_M            MIC_TETRA_EDGE  /* za 2D lokalizaciju (M1-M2)  */
 

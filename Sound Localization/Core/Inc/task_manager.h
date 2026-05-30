@@ -4,7 +4,7 @@
 #include "cmsis_os.h"
 
 /**
- * @brief Kreira sve aplikacijske FreeRTOS taskove (ACQ, FFT, UART, GCC, default).
+ * @brief Kreira aplikacijske FreeRTOS taskove (ACQ, FFT, UART).
  *
  * Mora se pozvati NAKON što su queue-i (queueDmaEventHandle, queueSnapshotHandle,
  * queueResultHandle) već stvoreni u main(), a PRIJE osKernelStart().

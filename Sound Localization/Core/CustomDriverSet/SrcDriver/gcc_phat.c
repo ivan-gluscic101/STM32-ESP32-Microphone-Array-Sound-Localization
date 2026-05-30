@@ -1,5 +1,29 @@
 #include "gcc_phat.h"
+#include "arm_math.h"
 #include <math.h>
+
+#define FFT_SIZE        SAMPLES_PER_CHANNEL   /* 512 */
+
+#ifndef PI
+#define PI 3.14159265358979323846f
+#endif
+
+uint16_t dbg_raw_ch0[FFT_SIZE];
+uint16_t dbg_raw_ch1[FFT_SIZE];
+uint16_t dbg_raw_ch2[FFT_SIZE];
+uint16_t dbg_raw_ch3[FFT_SIZE];
+float    dbg_dc[4];
+
+static arm_rfft_fast_instance_f32 s_rfft;
+static float s_hann[FFT_SIZE];
+
+void GCC_Init(void)
+{
+    for (int i = 0; i < FFT_SIZE; i++) {
+        s_hann[i] = 0.5f * (1.0f - cosf(2.0f * PI * (float)i / (float)(FFT_SIZE - 1)));
+    }
+    arm_rfft_fast_init_f32(&s_rfft, FFT_SIZE);
+}
 
 void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
                          float ch0[], float ch1[],
@@ -7,93 +31,160 @@ void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
 {
     const uint16_t *p = &buf[frame_offset * NUM_CH];
 
-    /* Prolaz 1: akumuliraj DC po kanalu */
     float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
+    for (int s = 0; s < FFT_SIZE; s++) {
         sum0 += (float)p[s * NUM_CH + 0];
         sum1 += (float)p[s * NUM_CH + 1];
         sum2 += (float)p[s * NUM_CH + 2];
         sum3 += (float)p[s * NUM_CH + 3];
     }
-    float inv_n = 1.0f / SAMPLES_PER_CHANNEL;
+    float inv_n = 1.0f / (float)FFT_SIZE;
     float dc0 = sum0 * inv_n;
     float dc1 = sum1 * inv_n;
     float dc2 = sum2 * inv_n;
     float dc3 = sum3 * inv_n;
 
-    /* Prolaz 2: deinterleave + DC removal */
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
-        ch0[s] = (float)p[s * NUM_CH + 0] - dc0;
-        ch1[s] = (float)p[s * NUM_CH + 1] - dc1;
-        ch2[s] = (float)p[s * NUM_CH + 2] - dc2;
-        ch3[s] = (float)p[s * NUM_CH + 3] - dc3;
+    dbg_dc[0] = dc0; dbg_dc[1] = dc1; dbg_dc[2] = dc2; dbg_dc[3] = dc3;
+
+    for (int s = 0; s < FFT_SIZE; s++) {
+        uint16_t r0 = p[s * NUM_CH + 0];
+        uint16_t r1 = p[s * NUM_CH + 1];
+        uint16_t r2 = p[s * NUM_CH + 2];
+        uint16_t r3 = p[s * NUM_CH + 3];
+
+        dbg_raw_ch0[s] = r0;
+        dbg_raw_ch1[s] = r1;
+        dbg_raw_ch2[s] = r2;
+        dbg_raw_ch3[s] = r3;
+
+        float w = s_hann[s];
+        ch0[s] = ((float)r0 - dc0) * w;
+        ch1[s] = ((float)r1 - dc1) * w;
+        ch2[s] = ((float)r2 - dc2) * w;
+        ch3[s] = ((float)r3 - dc3) * w;
     }
+
+    volatile uint32_t tmp;
+    tmp = 32;
+    (void) tmp; //used for debugging
 }
 
 float GCC_RMS(const float *ch)
 {
     float acc = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
+    for (int s = 0; s < FFT_SIZE; s++) {
         acc += ch[s] * ch[s];
     }
-    return sqrtf(acc / (float)SAMPLES_PER_CHANNEL);
+    return sqrtf(acc / (float)FFT_SIZE);
 }
 
-float GCC_ComputeLag(const float *ref, const float *sig, float *out_peak)
+/*
+ * CMSIS-DSP packing realnog FFT-a (N = FFT_SIZE):
+ *   fft[0] = bin 0 (DC)        — realan
+ *   fft[1] = bin N/2 (Nyquist) — realan, upakiran u DC imag slot
+ *   fft[2k]   = bin k realni dio   (k = 1 .. N/2-1)
+ *   fft[2k+1] = bin k imaginarni
+ *
+ * Cross-spektar X * conj(Y), PHAT normalizacija dijeli s |X*conj(Y)|.
+ */
+void GCC_PHAT(const float *ref, const float *sig, float *corr)
 {
-    /* Globalna normalizacija: e_ref × e_sig (obračunato jednom za sve lagove).
-     * Za lagove << N greška je < 4%, prihvatljivo za detekciju vrha. */
-    float e_ref = 0.0f, e_sig = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
-        e_ref += ref[s] * ref[s];
-        e_sig += sig[s] * sig[s];
-    }
-    float norm = sqrtf(e_ref * e_sig);
-    if (norm < 1e-6f) {
-        if (out_peak) *out_peak = 0.0f;
-        return 0.0f;
-    }
+    static float fft_x[FFT_SIZE];
+    static float fft_y[FFT_SIZE];
+    static float fft_c[FFT_SIZE];
 
-    /* Prolaz 1: izračunaj korelacije za sve lagove i pohrani ih.
-     * Indeks u polju: i = lag + TDOA_MAX_SAMPLES  (raspon 0 … 2×TDOA_MAX_SAMPLES)
-     * Veličina fiksna (41 × 4 B = 164 B na stacku). */
-#define N_LAGS (2 * TDOA_MAX_SAMPLES + 1)
-    float corr[N_LAGS];
-    int   best_idx = 0;
-    float best_val = -2.0f;
+    arm_rfft_fast_f32(&s_rfft, (float32_t *)ref, fft_x, 0);
+    arm_rfft_fast_f32(&s_rfft, (float32_t *)sig, fft_y, 0);
 
-    for (int i = 0; i < (int)N_LAGS; i++) {
-        int32_t lag  = (int32_t)i - TDOA_MAX_SAMPLES;
-        int s_start  = (lag < 0) ? -lag : 0;
-        int s_end    = (lag > 0) ? SAMPLES_PER_CHANNEL - lag : SAMPLES_PER_CHANNEL;
-
-        float acc = 0.0f;
-        for (int s = s_start; s < s_end; s++) {
-            acc += ref[s] * sig[s + lag];
-        }
-        corr[i] = acc / norm;
-
-        if (corr[i] > best_val) {
-            best_val = corr[i];
-            best_idx = i;
-        }
+    /* Bin 0 (DC) — realan */
+    {
+        float cre = fft_x[0] * fft_y[0];
+        float mag = fabsf(cre);
+        float w   = (mag > 1e-9f) ? (1.0f / (mag + 1e-9f)) : 0.0f;
+        fft_c[0]  = cre * w;
     }
 
-    if (out_peak) *out_peak = best_val;
-
-    /* Prolaz 2: parabolička interpolacija oko vrha za sub-sample preciznost.
-     * Parabola kroz tri točke:
-     *   delta = 0.5 * (R[i-1] - R[i+1]) / (R[i-1] - 2*R[i] + R[i+1])
-     * Primjenjiva samo kad postoje susjedi (vrh nije na rubu raspona). */
-    if (best_idx > 0 && best_idx < (int)N_LAGS - 1) {
-        float rm    = corr[best_idx - 1];
-        float rp    = corr[best_idx + 1];
-        float denom = rm - 2.0f * best_val + rp;
-        if (denom < -1e-6f) {   /* negativni denom = pravi konkavni vrh */
-            float delta = 0.5f * (rm - rp) / denom;
-            return (float)(best_idx - TDOA_MAX_SAMPLES) + delta;
-        }
+    /* Bin N/2 (Nyquist) — realan, u slotu fft[1] */
+    {
+        float cre = fft_x[1] * fft_y[1];
+        float mag = fabsf(cre);
+        float w   = (mag > 1e-9f) ? (1.0f / (mag + 1e-9f)) : 0.0f;
+        fft_c[1]  = cre * w;
     }
 
-    return (float)(best_idx - TDOA_MAX_SAMPLES);
+    /* Binovi 1 … N/2-1 — kompleksni */
+    for (int k = 1; k < FFT_SIZE / 2; k++) {
+        int ire = 2 * k;
+        int iim = 2 * k + 1;
+
+        float re1 = fft_x[ire], im1 = fft_x[iim];
+        float re2 = fft_y[ire], im2 = fft_y[iim];
+
+        /* X * conj(Y) */
+        float cre = re1 * re2 + im1 * im2;
+        float cim = im1 * re2 - re1 * im2;
+
+        float mag = sqrtf(cre * cre + cim * cim);
+        float w   = (mag > 1e-9f) ? (1.0f / (mag + 1e-9f)) : 0.0f;
+
+        fft_c[ire] = cre * w;
+        fft_c[iim] = cim * w;
+    }
+
+    /* Inverzni RFFT → realna korelacijska sekvenca */
+    arm_rfft_fast_f32(&s_rfft, fft_c, corr, 1);
+}
+
+float GCC_FindTDOA(const float *corr, float *qual_out)
+{
+    /* Maksimum samo unutar fizički mogućeg raspona lagova.
+     * Za 10 cm brid pri 64 kHz: max ≈ 18.66 uzoraka → TDOA_MAX_SAMPLES = 20. */
+    const int max_lag = TDOA_MAX_SAMPLES;
+
+    int   max_idx = 0;
+    float max_val = corr[0];
+
+    /* Pozitivni lagovi: 1 … max_lag */
+    for (int i = 1; i <= max_lag; i++) {
+        if (corr[i] > max_val) { max_val = corr[i]; max_idx = i; }
+    }
+    /* Negativni lagovi: cirkularno na kraju buffera (FFT_SIZE-max_lag … FFT_SIZE-1) */
+    for (int i = FFT_SIZE - max_lag; i < FFT_SIZE; i++) {
+        if (corr[i] > max_val) { max_val = corr[i]; max_idx = i; }
+    }
+
+    /* Quality: omjer pika i srednje apsolutne vrijednosti cijele korelacije.
+     * Za pravi signal pik je oštar → visok omjer; za šum omjer ≈ 1. */
+    if (qual_out) {
+        float sum = 0.0f;
+        for (int i = 0; i < FFT_SIZE; i++) sum += fabsf(corr[i]);
+        float mean_abs = sum / (float)FFT_SIZE;
+        *qual_out = (mean_abs > 1e-9f) ? (max_val / mean_abs) : 0.0f;
+    }
+
+    /* Parabolička interpolacija s cirkularnim susjedima */
+    int   il = (max_idx == 0)            ? (FFT_SIZE - 1) : (max_idx - 1);
+    int   ir = (max_idx == FFT_SIZE - 1) ? 0              : (max_idx + 1);
+    float c0 = corr[il];
+    float c1 = max_val;
+    float c2 = corr[ir];
+
+    float denom = (c0 - 2.0f * c1 + c2);
+    float delta = 0.0f;
+    if (fabsf(denom) > 1e-12f) {
+        delta = 0.5f * (c0 - c2) / denom;
+        if (delta > 1.0f)  delta = 1.0f;
+        if (delta < -1.0f) delta = -1.0f;
+    }
+
+    float frac = (float)max_idx + delta;
+    if (frac < 0.0f)              frac += (float)FFT_SIZE;
+    else if (frac >= (float)FFT_SIZE) frac -= (float)FFT_SIZE;
+
+    /* Cirkularno: indeksi < N/2 = pozitivni lagovi, ≥ N/2 = negativni */
+    float delay_samp = (frac < (float)(FFT_SIZE / 2))
+                       ? frac
+                       : frac - (float)FFT_SIZE;
+
+    return delay_samp * SAMPLE_PERIOD_S;
 }

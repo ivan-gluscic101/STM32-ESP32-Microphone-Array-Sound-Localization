@@ -31,19 +31,18 @@
   *  Margina: 8 ms − 5 ms = 3 ms → bez gubitka podataka, uz overhead i preempcije
   *
   * ── Stack analiza ───────────────────────────────────────────────────────────
-  *  defaultTask:  128 words (512 B) — osDelay loop, OK
-  *  ACQ_Task:     256 words (1 KB)  — memcpy + semaphore, nema float, OK
+  *  ACQ_Task:     256 words (1 KB)  — memcpy + queue, nema float, OK
   *  FFT_Task:     512 words (2 KB)  — float aritmetika + FPU kontekst (~128 B)
   *                                    svi veliki nizovi su static u sound_loc_3d.c
   *                                    procijenjeno ~500 B max → 2 KB je dostatno
-  *  GCC_Task:     512 words (2 KB)  — rezervirano za buduće proširenje
   *  UART_Task:    256 words (1 KB)  — UART byte slanje, OK
-  *  Ukupno stack: 6656 B + 5 × TCB (~140 B) + 3 queues + 1 sem ≈ 8 KB
+  *  Ukupno stack: 4 KB + 3 × TCB (~84 B) + 3 queues ≈ 5 KB
+  *  + FreeRTOS-ov vlastiti idle task (kreira se automatski)
   *  Heap limit (FreeRTOSConfig.h): 16 KB — dostatno
   *
   * ── Prioriteti ──────────────────────────────────────────────────────────────
   *  ACQ_Task (Realtime) preemptira sve → buffer kopiran odmah po DMA eventu
-  *  FFT_Task (High) preemptira GCC i UART → obrada ima prednost pred slanjem
+  *  FFT_Task (High) preemptira UART → obrada ima prednost pred slanjem
   *  UART_Task (Low) nikad ne blokira obradu
   *  DMA NVIC prio 5 = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY → ISR-safe
   ******************************************************************************
@@ -61,9 +60,9 @@
 #include "timer_driver.h"
 #include "uart_driver.h"
 #include "sound_loc_3d.h"
+#include "gcc_phat.h"
 #include "task_manager.h"
 #include <string.h>
-#include <stdio.h>
 /* USER CODE END Includes */
 
 /* ── FreeRTOS handles ─────────────────────────────────────────────────────── */
@@ -89,11 +88,9 @@ static uint16_t sliding_buf[2 * HALF_BUFFER];
 /* USER CODE END PV */
 
 /* ── Task prototipi (definicije ovdje, kreiranje u task_manager.c) ────────── */
-void StartDefaultTask(void const *argument);
 void StartACQTask(void const *argument);
 void StartUARTTask(void const *argument);
 void StartFFTTask(void const *argument);
-void StartTask05(void const *argument);
 void SystemClock_Config(void);
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -112,6 +109,7 @@ int main(void)
   Custom_ADC_Init();
   Custom_UART4_Init();
   Custom_TIM8_Init();
+  GCC_Init();           /* inicijalizira FFT instance + Hann prozor */
   Custom_ACQ_Start();   /* kalibrira ADC, postavlja DMA, pali TIM8 trigger */
   /* USER CODE END 2 */
 
@@ -146,11 +144,6 @@ int main(void)
 }
 
 /* ── Task implementacije ──────────────────────────────────────────────────── */
-
-void StartDefaultTask(void const *argument)
-{
-  for (;;) { osDelay(1); }
-}
 
 /**
  * ACQ_Task — čeka DMA event, kopira half-buffer u jedan od dva snapshot buffera,
@@ -250,47 +243,6 @@ void StartUARTTask(void const *argument)
     if (xQueueReceive(queueResultHandle, &r, portMAX_DELAY) == pdTRUE) {
       UART_SendAngle3DPacket(r.az_tenth, r.el_tenth, r.strength);
     }
-  }
-}
-
-/**
- * GCC_Task — periodično šalje FreeRTOS runtime stats kroz UART4.
- * Čeka 3 s pri pokretanju da taskovi nakupe mjerljivo CPU vrijeme,
- * zatim ispisuje snapshot svakih 10 s.
- */
-void StartTask05(void const *argument)
-{
-  static TaskStatus_t tasks[10];
-  static char line[64];
-  osDelay(3000);
-  for (;;) {
-    /* NE koristimo pulTotalRunTime iz uxTaskGetSystemState — to je trenutni    */
-    /* snapshot DWT/170 brojača koji wrappa svakih ~25 s. Umjesto toga,         */
-    /* sumiramo ulRunTimeCounter svih taskova → suma = ukupno CPU vrijeme od   */
-    /* boota (akumulirano kroz context switcheve, ispravno do wrapa za ~71 min)*/
-    UBaseType_t n = uxTaskGetSystemState(tasks, 10, NULL);
-
-    uint64_t total = 0;
-    for (UBaseType_t i = 0; i < n; i++) {
-      total += tasks[i].ulRunTimeCounter;
-    }
-    if (total == 0) {
-      osDelay(10000);
-      continue;
-    }
-
-    UART_SendString("\r\nTask             CPU (us)   CPU%\r\n");
-    UART_SendString("-----------------------------------\r\n");
-    for (UBaseType_t i = 0; i < n; i++) {
-      uint32_t pct = (uint32_t)(((uint64_t)tasks[i].ulRunTimeCounter * 100ULL) / total);
-      snprintf(line, sizeof(line), "%-16s %9lu   %3lu%%\r\n",
-               tasks[i].pcTaskName,
-               tasks[i].ulRunTimeCounter,
-               pct);
-      UART_SendString(line);
-    }
-    UART_SendString("-----------------------------------\r\n");
-    osDelay(10000);
   }
 }
 

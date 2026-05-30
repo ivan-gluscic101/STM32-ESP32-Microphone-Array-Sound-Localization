@@ -6,14 +6,6 @@ static inline void UART_SendByte(uint8_t byte)
     LL_USART_TransmitData8(UART4, byte);
 }
 
-void UART_SendString(const char *str)
-{
-    while (*str) {
-        UART_SendByte((uint8_t)*str++);
-    }
-    while (!LL_USART_IsActiveFlag_TC(UART4));
-}
-
 void Custom_UART4_Init(void)
 {
     LL_USART_InitTypeDef USART_InitStruct = {0};

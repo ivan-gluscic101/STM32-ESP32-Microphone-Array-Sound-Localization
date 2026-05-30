@@ -15,12 +15,12 @@
  *
  *   2. configTOTAL_HEAP_SIZE: 12288 → 20480 (20 KB)
  *      Novi raspored:
- *        - processTask stack: 512 words × 4 =  2048 B
- *        - uartTask stack:    256 words × 4 =  1024 B
- *        - defaultTask stack: 128 words × 4 =   512 B
- *        - 2 queue-a + overhead:               ~600 B
- *        - Ukupno RTOS:                       ~4.2 KB
- *        - Slobodno za buduće taskove:        ~16 KB
+ *        - ACQ_Task stack:    256 words × 4 =  1024 B
+ *        - FFT_Task stack:    512 words × 4 =  2048 B
+ *        - UART_Task stack:   256 words × 4 =  1024 B
+ *        - 3 queue-a + overhead:               ~600 B
+ *        - Ukupno RTOS:                       ~4.7 KB
+ *        - Slobodno za buduće taskove:        ~15 KB
  *      STM32G474RE ima 128 KB RAM-a, 20 KB heap je samo 15.6%.
  *
  *   3. configUSE_TIME_SLICING eksplicitno postavljeno na 1

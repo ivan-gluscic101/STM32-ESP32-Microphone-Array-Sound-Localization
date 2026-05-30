@@ -2,51 +2,48 @@
 #define GCC_PHAT_H
 
 /*
- * gcc_phat.h — Normalizirana križna korelacija (GCC bez PHAT težiniranja)
+ * gcc_phat.h — GCC-PHAT (Generalized Cross-Correlation with Phase Transform)
  *
- * Implementacija: vremenska domena, O(N × 2L) po paru
- *   N = SAMPLES_PER_CHANNEL = 512, L = TDOA_MAX_SAMPLES = 20
- *   512 × 40 × 3 para × 4B ≈ ~250 K float operacija → ~1.5 ms @ 170 MHz FPU
- *
- * Za PHAT težiniranje (bolje u reverberantnim prostorima) potreban je
- * arm_rfft_fast_f32 iz CMSIS-DSP — može se dodati naknadno.
+ * Implementacija: FFT domena preko CMSIS-DSP arm_rfft_fast_f32
+ *   FFT_SIZE = SAMPLES_PER_CHANNEL = 512
+ *   Po paru:  2 × forward FFT + cross-spektar + PHAT normalizacija + 1 × IFFT
  *
  * ADC buffer layout (interleaved):
- *   buf[s*4 + 0] = M1 (PA0,  RANK1) — uzorkovan u t_s + 0×870.6 ns
- *   buf[s*4 + 1] = M2 (PB14, RANK2) — uzorkovan u t_s + 1×870.6 ns
- *   buf[s*4 + 2] = M3 (PC0,  RANK3) — uzorkovan u t_s + 2×870.6 ns
- *   buf[s*4 + 3] = M4 (PC1,  RANK4) — uzorkovan u t_s + 3×870.6 ns
+ *   buf[s*4 + 0] = M1 (PA0, RANK1)  — uzorkovan u t_s + 0 × CH_DELAY_S
+ *   buf[s*4 + 1] = M2 (PA1, RANK2)  — uzorkovan u t_s + 1 × CH_DELAY_S
+ *   buf[s*4 + 2] = M3 (PC0, RANK3)  — uzorkovan u t_s + 2 × CH_DELAY_S
+ *   buf[s*4 + 3] = M4 (PC1, RANK4)  — uzorkovan u t_s + 3 × CH_DELAY_S
  */
 
 #include "audio_common.h"
 #include <stdint.h>
 
-/*
- * Deinterleava SAMPLES_PER_CHANNEL frejmova u 4 odvojena float niza i uklanja
- * DC po kanalu. Početak prozora je na frejmu `frame_offset` unutar `buf` —
- * podržava sliding/overlap obradu unutar većeg buffera (npr. 1024 frejma).
- *
- * Pozivatelj mora osigurati da `buf` sadrži barem (frame_offset + SAMPLES_PER_CHANNEL)
- * frejmova × NUM_CH uzoraka.
- */
+/* Inicijalizacija FFT instance + Hann prozora. Pozvati JEDNOM na startu. */
+void GCC_Init(void);
+
+/* Deinterleave + DC removal + Hann prozor.
+ * frame_offset omogućava sliding window unutar većeg buffera. */
 void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
                          float ch0[], float ch1[],
                          float ch2[], float ch3[]);
 
-/*
- * Normalizirana križna korelacija s paraboličkom interpolacijom vrha.
- * Vraća sub-sample lag u [-TDOA_MAX, +TDOA_MAX] (float).
- * Pozitivni lag = ref vodi sig (ref dolazi prije sig u prostoru).
- *
- * Ako `out_peak` nije NULL, u njega se upisuje normalizirana vrijednost vrha
- * korelacije (raspon -1..+1). Mjera kvalitete:
- *   > 0.5  → jasan vrh (pravi zvuk)
- *   0.2..0.5 → slab/razmazan vrh (slabi signal ili reverberacija)
- *   < 0.2  → nema koherentnog signala (tipično tišina/šum)
- */
-float GCC_ComputeLag(const float *ref, const float *sig, float *out_peak);
+/* GCC-PHAT između dva signala. corr duljine SAMPLES_PER_CHANNEL.
+ * Pozitivni indeks vrha (< N/2) = sig kasni za ref-om. */
+void GCC_PHAT(const float *ref, const float *sig, float *corr);
 
-/* RMS jednog kanala (SAMPLES_PER_CHANNEL uzoraka, DC već uklonjen). */
+/* Vrh korelacije + parabolička interpolacija → kašnjenje u sekundama.
+ * Pozitivno = sig kasni za ref-om.
+ * qual_out (nullable): peak / mean|corr| — visoko za pravi signal, ~1 za šum. */
+float GCC_FindTDOA(const float *corr, float *qual_out);
+
+/* RMS jednog kanala (DC već uklonjen). */
 float GCC_RMS(const float *ch);
+
+/* Debug snapshot. */
+extern uint16_t dbg_raw_ch0[SAMPLES_PER_CHANNEL];
+extern uint16_t dbg_raw_ch1[SAMPLES_PER_CHANNEL];
+extern uint16_t dbg_raw_ch2[SAMPLES_PER_CHANNEL];
+extern uint16_t dbg_raw_ch3[SAMPLES_PER_CHANNEL];
+extern float    dbg_dc[4];
 
 #endif /* GCC_PHAT_H */

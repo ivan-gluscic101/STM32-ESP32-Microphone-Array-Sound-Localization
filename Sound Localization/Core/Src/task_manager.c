@@ -57,13 +57,6 @@ static void StartFFTTask(void const *argument)
     loc3d_result_t result;
     uint8_t read_idx;
 
-    /* Tri prozora s 50% preklapanjem — hvata transienti na granici DMA blokova */
-    static const uint32_t offsets[3] = {
-        0u,
-        SAMPLES_PER_CHANNEL / 2u,
-        SAMPLES_PER_CHANNEL
-    };
-
     for (;;) {
         if (xQueueReceive(queueSnapshotHandle, &read_idx, portMAX_DELAY) != pdTRUE) { continue; }
 
@@ -74,10 +67,9 @@ static void StartFFTTask(void const *argument)
                acq_snapshot[read_idx],
                HALF_BUFFER * sizeof(uint16_t));
 
-        for (int i = 0; i < 3; i++) {
-            if (LOC3D_Process(sliding_buf, offsets[i], &result)) {
-                xQueueSend(queueResultHandle, &result, 0);
-            }
+        /* LOC3D_Process interno traži energetski vrh i centrira prozor. */
+        if (LOC3D_Process(sliding_buf, &result)) {
+            xQueueSend(queueResultHandle, &result, 0);
         }
     }
 }

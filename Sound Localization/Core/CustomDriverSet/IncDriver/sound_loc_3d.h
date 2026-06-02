@@ -40,7 +40,6 @@ typedef struct {
  * @param out           rezultat lokalizacije (validan samo ako je povrat 1)
  * @return              1 = valjan smjer izračunat, 0 = tišina / nekonzistentni TDOA
  */
-uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
-                      loc3d_result_t *out);
+uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out);
 
 #endif /* SOUND_LOC_3D_H */

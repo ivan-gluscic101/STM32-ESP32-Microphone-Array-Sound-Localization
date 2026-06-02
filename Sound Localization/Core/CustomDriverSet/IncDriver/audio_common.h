@@ -15,8 +15,8 @@
 
 /* ── ADC sekvencijalni offset ─────────────────────────────────────────────── */
 /* ADC clock = PCLK/4 = 170 MHz/4 = 42.5 MHz → perioda 23.53 ns              */
-/* Svaki kanal = 24.5 (sampling) + 12.5 (conv) = 37 ciklusa = 870.6 ns       */
-#define CH_DELAY_S            870.6e-9f
+/* Svaki kanal = 2.5 (sampling) + 12.5 (conv) = 15 ciklusa = 352.9 ns        */
+#define CH_DELAY_S            352.9e-9f
 
 /* ── Akustika ──────────────────────────────────────────────────────────────── */
 #define SPEED_OF_SOUND        343.0f    /* m/s pri ~20°C */
@@ -28,7 +28,7 @@
 /*        │                                                                     */
 /*   M3 (5cm, 8.66cm, 0)   M4 (5cm, 2.89cm, 8.16cm)                          */
 /*                                                                              */
-/* ADC redosljed: RANK1=M1(PA0), RANK2=M2(PA1),  RANK3=M3(PC0), RANK4=M4(PC1)*/
+/* ADC redosljed: RANK1=M1(PB14), RANK2=M2(PC0), RANK3=M3(PC1), RANK4=M4(PC2)*/
 #define MIC_TETRA_EDGE        0.10f
 #define MIC_DIST_M            MIC_TETRA_EDGE  /* za 2D lokalizaciju (M1-M2)  */
 

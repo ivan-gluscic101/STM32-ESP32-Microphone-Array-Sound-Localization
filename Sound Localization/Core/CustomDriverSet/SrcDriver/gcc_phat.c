@@ -2,7 +2,7 @@
 #include "arm_math.h"
 #include <math.h>
 
-#define FFT_SIZE        SAMPLES_PER_CHANNEL   /* 512 */
+#define FFT_SIZE        SAMPLES_PER_CHANNEL
 
 #ifndef PI
 #define PI 3.14159265358979323846f
@@ -146,25 +146,28 @@ float GCC_FindTDOA(const float *corr, float *qual_out)
      * Za 10 cm brid pri 64 kHz: max ≈ 18.66 uzoraka → TDOA_MAX_SAMPLES = 20. */
     const int max_lag = TDOA_MAX_SAMPLES;
 
-    int   max_idx = 0;
-    float max_val = corr[0];
+    /* Traži apsolutni peak — hvata i negativne pikove (invertiran polaritet kanala). */
+    int   max_idx  = 0;
+    float best_abs = fabsf(corr[0]);
+    float max_val  = corr[0];
 
     /* Pozitivni lagovi: 1 … max_lag */
     for (int i = 1; i <= max_lag; i++) {
-        if (corr[i] > max_val) { max_val = corr[i]; max_idx = i; }
+        float a = fabsf(corr[i]);
+        if (a > best_abs) { best_abs = a; max_val = corr[i]; max_idx = i; }
     }
     /* Negativni lagovi: cirkularno na kraju buffera (FFT_SIZE-max_lag … FFT_SIZE-1) */
     for (int i = FFT_SIZE - max_lag; i < FFT_SIZE; i++) {
-        if (corr[i] > max_val) { max_val = corr[i]; max_idx = i; }
+        float a = fabsf(corr[i]);
+        if (a > best_abs) { best_abs = a; max_val = corr[i]; max_idx = i; }
     }
 
-    /* Quality: omjer pika i srednje apsolutne vrijednosti cijele korelacije.
-     * Za pravi signal pik je oštar → visok omjer; za šum omjer ≈ 1. */
+    /* Quality: omjer apsolutnog pika i srednje apsolutne vrijednosti cijele korelacije. */
     if (qual_out) {
         float sum = 0.0f;
         for (int i = 0; i < FFT_SIZE; i++) sum += fabsf(corr[i]);
         float mean_abs = sum / (float)FFT_SIZE;
-        *qual_out = (mean_abs > 1e-9f) ? (max_val / mean_abs) : 0.0f;
+        *qual_out = (mean_abs > 1e-9f) ? (best_abs / mean_abs) : 0.0f;
     }
 
     /* Parabolička interpolacija s cirkularnim susjedima */

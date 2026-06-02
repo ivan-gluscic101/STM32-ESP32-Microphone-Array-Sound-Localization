@@ -9,7 +9,7 @@
 #define UART_TX_PIN         (17)
 #define UART_RX_PIN         (16)
 #define UART_BUF_SIZE       (1024)
-#define UART_BAUD_RATE      (921600)
+#define UART_BAUD_RATE      (115200)
 
 /* Markeri paketa (identično kao na STM32 strani) */
 #define ANGLE_PKT_SOF1      0xAA

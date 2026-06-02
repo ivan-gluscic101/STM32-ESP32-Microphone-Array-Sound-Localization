@@ -9,10 +9,10 @@
  *   Po paru:  2 × forward FFT + cross-spektar + PHAT normalizacija + 1 × IFFT
  *
  * ADC buffer layout (interleaved):
- *   buf[s*4 + 0] = M1 (PA0, RANK1)  — uzorkovan u t_s + 0 × CH_DELAY_S
- *   buf[s*4 + 1] = M2 (PA1, RANK2)  — uzorkovan u t_s + 1 × CH_DELAY_S
- *   buf[s*4 + 2] = M3 (PC0, RANK3)  — uzorkovan u t_s + 2 × CH_DELAY_S
- *   buf[s*4 + 3] = M4 (PC1, RANK4)  — uzorkovan u t_s + 3 × CH_DELAY_S
+ *   buf[s*4 + 0] = M1 (PB14, RANK1) — uzorkovan u t_s + 0 × CH_DELAY_S
+ *   buf[s*4 + 1] = M2 (PC0,  RANK2) — uzorkovan u t_s + 1 × CH_DELAY_S
+ *   buf[s*4 + 2] = M3 (PC1,  RANK3) — uzorkovan u t_s + 2 × CH_DELAY_S
+ *   buf[s*4 + 3] = M4 (PC2,  RANK4) — uzorkovan u t_s + 3 × CH_DELAY_S
  */
 
 #include "audio_common.h"

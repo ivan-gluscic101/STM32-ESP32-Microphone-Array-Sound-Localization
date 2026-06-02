@@ -35,7 +35,7 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
 /* Detekcijski prag — privremeno snižen za CH_DELAY kalibraciju.
  * Spojeni su 4 ADC pina paralelno pa svi vide isti signal; bilo koji
  * pljesak iznad šumnog poda mora generirati detekciju. */
-#define MIN_RMS_THRESHOLD       8.0f
+#define MIN_RMS_THRESHOLD       25.0f
 #define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.3f)
 
 #define SILENCE_RMS_THRESH      5.0f
@@ -44,11 +44,13 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
 /* Minimalni omjer pika GCC-PHAT korelacije i mean|corr|.
  * Tijekom CH_DELAY kalibracije snižen na 1.5 — svi kanali nose isti signal
  * pa će korelacija imati ekstremno oštar pik blizu lag=0. */
-#define GCC_MIN_PEAK_QUALITY    1.5f
+#define GCC_MIN_PEAK_QUALITY    2.0f
 
-typedef enum { DET_ARMED = 0, DET_HOLDOFF } det_state_t;
-static det_state_t s_det_state   = DET_ARMED;
-static uint16_t    s_silence_run = 0;
+/* Broj LOC3D_Process poziva koji se ignoriraju nakon svake detekcije.
+ * 1 poziv ≈ 5.3 ms (16 ms half-buffer / 3 prozora) → 57 ≈ 300 ms cooldown. */
+#define DETECTION_COOLDOWN_FRAMES  57
+
+static uint16_t s_cooldown = 0;
 
 /* Kanalni nizovi — 4 × 512 × 4 B = 8 KB u BSS. */
 static float s_ch0[SAMPLES_PER_CHANNEL];
@@ -86,21 +88,72 @@ static const float M_geom[3][3] = {
 volatile uint32_t dbg_loc3d_call_count = 0;
 volatile float    dbg_last_rms[4];
 
-uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
-                      loc3d_result_t *out)
+/*
+ * Sliding-window energy search — traži 16-frame prozor s najvećom energijom
+ * u cijelom sliding_buf (2 × SAMPLES_PER_CHANNEL frejmova), zatim centrira
+ * GCC prozor na taj vrh.
+ *
+ * Inkrementalni algoritam: O(N × NUM_CH) umjesto O(N × PROBE × NUM_CH).
+ * Na 2048 frejmova × 4 kanala ≈ 8 K operacija → < 0.1 ms @ 170 MHz.
+ */
+static uint32_t find_peak_offset(const uint16_t *buf)
+{
+    const uint32_t TOTAL = 2u * SAMPLES_PER_CHANNEL;
+    const uint32_t PROBE = 16u;   /* ~250 µs @ 64 kHz — dovoljno za detekciju */
+    const uint32_t HALF  = SAMPLES_PER_CHANNEL / 2u;
+
+    /* Izračunaj energiju prvog prozora */
+    uint32_t win_e = 0u;
+    for (uint32_t i = 0u; i < PROBE; i++) {
+        const uint16_t *s = &buf[i * NUM_CH];
+        for (uint32_t ch = 0u; ch < (uint32_t)NUM_CH; ch++) {
+            int32_t v = (int32_t)s[ch] - 2048;
+            win_e += (uint32_t)((uint32_t)(v * v) >> 6);
+        }
+    }
+    uint32_t best_e     = win_e;
+    uint32_t best_frame = PROBE / 2u;
+
+    /* Inkrementalno kliži prozor */
+    for (uint32_t f = 1u; f + PROBE <= TOTAL; f++) {
+        for (uint32_t ch = 0u; ch < (uint32_t)NUM_CH; ch++) {
+            int32_t v_old = (int32_t)buf[(f - 1u) * NUM_CH + ch] - 2048;
+            int32_t v_new = (int32_t)buf[(f + PROBE - 1u) * NUM_CH + ch] - 2048;
+            win_e -= (uint32_t)((uint32_t)(v_old * v_old) >> 6);
+            win_e += (uint32_t)((uint32_t)(v_new * v_new) >> 6);
+        }
+        if (win_e > best_e) {
+            best_e     = win_e;
+            best_frame = f + PROBE / 2u;
+        }
+    }
+
+    /* Centriraj GCC prozor na vrh energije, stisnuti u valjane granice */
+    if (best_frame < HALF)              return 0u;
+    if (best_frame + HALF > TOTAL)      return TOTAL - SAMPLES_PER_CHANNEL;
+    return best_frame - HALF;
+}
+
+uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out)
 {
     dbg_loc3d_call_count++;
 
-    /* 1. Deinterleave + DC removal + Hann prozor */
+    /* Cooldown — preskači obradu odmah, bez skupog peak-findinga */
+    if (s_cooldown > 0) { s_cooldown--; return 0; }
+
+    /* 1. Nađi gdje je pljesak — GCC prozor centriran na energetski vrh */
+    uint32_t frame_offset = find_peak_offset(buf);
+    dbg_frame_offset = frame_offset;
+
+    /* 2. Deinterleave + DC removal + Hann prozor na poravnatom offsetu */
     GCC_ExtractChannels(buf, frame_offset, s_ch0, s_ch1, s_ch2, s_ch3);
 
-    /* 2. Silence gate (MAX za detekciju, MIN za kvalitetu mjerenja) */
+    /* 3. RMS gate */
     float rms0 = GCC_RMS(s_ch0);
     float rms1 = GCC_RMS(s_ch1);
     float rms2 = GCC_RMS(s_ch2);
     float rms3 = GCC_RMS(s_ch3);
 
-    /* Snimi RMS prije gate-ova — vidiš stvarne vrijednosti čak i u tišini */
     dbg_last_rms[0] = rms0; dbg_last_rms[1] = rms1;
     dbg_last_rms[2] = rms2; dbg_last_rms[3] = rms3;
 
@@ -113,19 +166,6 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
     if (rms1 < rms_min) rms_min = rms1;
     if (rms2 < rms_min) rms_min = rms2;
     if (rms3 < rms_min) rms_min = rms3;
-
-    /* HOLDOFF state machine — sprječava višestruke detekcije istog pljeska. */
-    if (s_det_state == DET_HOLDOFF) {
-        if (rms_max < SILENCE_RMS_THRESH) {
-            if (++s_silence_run >= SILENCE_FRAMES_REQUIRED) {
-                s_det_state   = DET_ARMED;
-                s_silence_run = 0;
-            }
-        } else {
-            s_silence_run = 0;
-        }
-        return 0;
-    }
 
     if (rms_max < MIN_RMS_THRESHOLD)    return 0;
     if (rms_min < MIN_RMS_PER_CHANNEL)  return 0;
@@ -147,7 +187,7 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
         qual13 < GCC_MIN_PEAK_QUALITY ||
         qual14 < GCC_MIN_PEAK_QUALITY) return 0;
 
-    /* Detekcija prošla — snimi sirovi sadržaj prozora za debug. */
+    /* Detekcija prošla — snimi sirovi sadržaj poravnatog prozora za debug. */
     GCC_SnapshotRaw(buf, frame_offset);
 
     /* Debug snapshot svih ključnih veličina algoritma. */
@@ -158,7 +198,7 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
     dbg_qual13 = qual13;
     dbg_qual14 = qual14;
     dbg_rms[0] = rms0; dbg_rms[1] = rms1; dbg_rms[2] = rms2; dbg_rms[3] = rms3;
-    dbg_frame_offset = frame_offset;
+    /* dbg_frame_offset je već postavljen gore (find_peak_offset rezultat) */
 
     /* Akumuliraj za CH_DELAY estimaciju */
     dbg_tau_sum[0] += tau12_meas;
@@ -219,9 +259,6 @@ uint8_t LOC3D_Process(const uint16_t *buf, uint32_t frame_offset,
     if (str_f > 100.0f)  str_f = 100.0f;
     out->strength = (uint8_t)str_f;
 
-    /* 9. Aktiviraj HOLDOFF do sljedeće tišine */
-    s_det_state   = DET_HOLDOFF;
-    s_silence_run = 0;
-
+    s_cooldown = DETECTION_COOLDOWN_FRAMES;
     return 1;
 }

@@ -3,7 +3,7 @@
 
 /* ── Buffer layout ─────────────────────────────────────────────────────────── */
 #define NUM_CH                4
-#define SAMPLES_PER_CHANNEL   512
+#define SAMPLES_PER_CHANNEL   1024
 #define HALF_SIZE             SAMPLES_PER_CHANNEL
 #define HALF_BUFFER           (NUM_CH * SAMPLES_PER_CHANNEL)   /* 2048 uzoraka */
 #define FULL_BUFFER           (HALF_BUFFER * 2)                /* 4096 uzoraka */

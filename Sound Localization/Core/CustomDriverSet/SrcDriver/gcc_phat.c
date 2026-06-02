@@ -52,21 +52,26 @@ void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
         uint16_t r2 = p[s * NUM_CH + 2];
         uint16_t r3 = p[s * NUM_CH + 3];
 
-        dbg_raw_ch0[s] = r0;
-        dbg_raw_ch1[s] = r1;
-        dbg_raw_ch2[s] = r2;
-        dbg_raw_ch3[s] = r3;
-
         float w = s_hann[s];
         ch0[s] = ((float)r0 - dc0) * w;
         ch1[s] = ((float)r1 - dc1) * w;
         ch2[s] = ((float)r2 - dc2) * w;
         ch3[s] = ((float)r3 - dc3) * w;
     }
+}
 
-    volatile uint32_t tmp;
-    tmp = 32;
-    (void) tmp; //used for debugging
+/* Snima sirovi sadržaj kanala u dbg_raw_chX[]. Zovi samo kad treba (npr. pri
+ * detekciji), ne za svaki prozor — inače su debug nizovi uvijek od zadnjeg
+ * prozora, ne od onog koji je trigerirao detekciju. */
+void GCC_SnapshotRaw(const uint16_t *buf, uint32_t frame_offset)
+{
+    const uint16_t *p = &buf[frame_offset * NUM_CH];
+    for (int s = 0; s < FFT_SIZE; s++) {
+        dbg_raw_ch0[s] = p[s * NUM_CH + 0];
+        dbg_raw_ch1[s] = p[s * NUM_CH + 1];
+        dbg_raw_ch2[s] = p[s * NUM_CH + 2];
+        dbg_raw_ch3[s] = p[s * NUM_CH + 3];
+    }
 }
 
 float GCC_RMS(const float *ch)

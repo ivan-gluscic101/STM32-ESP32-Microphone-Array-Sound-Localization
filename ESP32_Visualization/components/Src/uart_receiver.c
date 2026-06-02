@@ -12,7 +12,7 @@ static const char *TAG = "UART_RX";
 #define UART_RX_PIN GPIO_NUM_9
 #define UART_TX_PIN GPIO_NUM_10
 #define UART_BUF_SIZE 256
-#define UART_BAUD_RATE 921600
+#define UART_BAUD_RATE 115200
 
 #define FRAME_SOF1 0xAA
 #define FRAME_SOF2 0xBB

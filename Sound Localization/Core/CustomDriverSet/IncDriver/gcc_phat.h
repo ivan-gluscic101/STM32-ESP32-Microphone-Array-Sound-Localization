@@ -5,7 +5,7 @@
  * gcc_phat.h — GCC-PHAT (Generalized Cross-Correlation with Phase Transform)
  *
  * Implementacija: FFT domena preko CMSIS-DSP arm_rfft_fast_f32
- *   FFT_SIZE = SAMPLES_PER_CHANNEL = 512
+ *   FFT_SIZE = SAMPLES_PER_CHANNEL = 1024
  *   Po paru:  2 × forward FFT + cross-spektar + PHAT normalizacija + 1 × IFFT
  *
  * ADC buffer layout (interleaved):
@@ -26,6 +26,9 @@ void GCC_Init(void);
 void GCC_ExtractChannels(const uint16_t *buf, uint32_t frame_offset,
                          float ch0[], float ch1[],
                          float ch2[], float ch3[]);
+
+/* Snima sirovi sadržaj kanala u dbg_raw_chX[] (samo za debug). */
+void GCC_SnapshotRaw(const uint16_t *buf, uint32_t frame_offset);
 
 /* GCC-PHAT između dva signala. corr duljine SAMPLES_PER_CHANNEL.
  * Pozitivni indeks vrha (< N/2) = sig kasni za ref-om. */

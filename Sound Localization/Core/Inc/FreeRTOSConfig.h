@@ -50,7 +50,6 @@
 /* Ensure definitions are only used by the compiler, and not by the assembler. */
 #if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
   #include <stdint.h>
-  #include "stm32g4xx.h"
   extern uint32_t SystemCoreClock;
 #endif
 #define configENABLE_FPU                         1
@@ -65,7 +64,7 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 7 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)16384)
+#define configTOTAL_HEAP_SIZE                    ((size_t)24576)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_16_BIT_TICKS                   0
 #define configUSE_MUTEXES                        1
@@ -142,13 +141,18 @@ standard names. */
 #define configUSE_STATS_FORMATTING_FUNCTIONS     1
 
 /* DWT cycle counter kao izvor timestamps-a za runtime stats.
- * Na 170 MHz wrapa se svakih ~25 s — dovoljno za debug snapshot. */
-#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() do {          \
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;            \
-    DWT->CYCCNT = 0u;                                           \
-    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;                      \
+ * Koriste se fiksne Cortex-M4 adrese — nema ovisnosti o CMSIS verziji:
+ *   DEMCR   = 0xE000EDFC  (bit 24 = TRCENA)
+ *   DWT_CTRL= 0xE0001000  (bit  0 = CYCCNTENA)
+ *   DWT_CNT = 0xE0001004
+ * Na 170 MHz wrapa svakih ~25 s. */
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() do {                              \
+    *((volatile uint32_t *)0xE000EDFC) |= (1UL << 24U); /* DEMCR.TRCENA      */   \
+    *((volatile uint32_t *)0xE0001004)  = 0u;            /* DWT->CYCCNT = 0   */   \
+    *((volatile uint32_t *)0xE0001000) |= (1UL << 0U);  /* DWT->CTRL.CYCCNTENA */  \
 } while(0)
-#define portGET_RUN_TIME_COUNTER_VALUE()         (DWT->CYCCNT / 170u)
+#define portGET_RUN_TIME_COUNTER_VALUE() \
+    (*((volatile uint32_t *)0xE0001004) / 170u)
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

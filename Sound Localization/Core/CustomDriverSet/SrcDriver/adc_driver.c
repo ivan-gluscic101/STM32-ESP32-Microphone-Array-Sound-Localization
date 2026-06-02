@@ -38,9 +38,6 @@ void Custom_ADC_Init(void)
     LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PDATAALIGN_HALFWORD);
     LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MDATAALIGN_HALFWORD);
 
-    NVIC_SetPriority(ADC1_2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
-    NVIC_EnableIRQ(ADC1_2_IRQn);
-
     /* ADC inicijalizacija */
     ADC_InitStruct.Resolution  = LL_ADC_RESOLUTION_12B;
     ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_RIGHT;

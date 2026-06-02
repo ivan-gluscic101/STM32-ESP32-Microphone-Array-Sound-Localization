@@ -29,7 +29,7 @@ void Custom_UART4_Init(void)
     LL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
     USART_InitStruct.PrescalerValue      = LL_USART_PRESCALER_DIV1;
-    USART_InitStruct.BaudRate            = 921600;
+    USART_InitStruct.BaudRate            = 115200;
     USART_InitStruct.DataWidth           = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits            = LL_USART_STOPBITS_1;
     USART_InitStruct.Parity              = LL_USART_PARITY_NONE;

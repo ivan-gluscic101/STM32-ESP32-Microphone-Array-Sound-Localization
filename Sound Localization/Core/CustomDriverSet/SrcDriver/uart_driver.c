@@ -47,27 +47,6 @@ void Custom_UART4_Init(void)
     while (!LL_USART_IsActiveFlag_TEACK(UART4) || !LL_USART_IsActiveFlag_REACK(UART4));
 }
 
-void UART_SendFrame(const uint16_t *buf, uint32_t samples_per_ch, uint16_t fid)
-{
-    uint32_t i;
-    uint16_t val;
-
-    UART_SendByte(FRAME_SOF1);
-    UART_SendByte(FRAME_SOF2);
-    UART_SendByte((uint8_t)(fid >> 8));
-    UART_SendByte((uint8_t)(fid & 0xFF));
-
-    for (i = 0; i < samples_per_ch * NUM_CH; i++) {
-        val = buf[i];
-        UART_SendByte((uint8_t)(val >> 8));
-        UART_SendByte((uint8_t)(val & 0xFF));
-    }
-
-    UART_SendByte(FRAME_EOF1);
-    UART_SendByte(FRAME_EOF2);
-    while (!LL_USART_IsActiveFlag_TC(UART4));
-}
-
 void UART_SendAnglePacket(int16_t phi_tenth_deg, uint8_t strength)
 {
     UART_SendByte(0xAA);

@@ -1,67 +1,88 @@
 #include "ncc_tdoa.h"
 #include <math.h>
 
-void NCC_ExtractChannels(const uint16_t *buf,
-                         float ch0[], float ch1[],
-                         float ch2[], float ch3[])
+/*
+ * NCC_FindTDOA — time-domain cross-correlation TDOA estimator.
+ *
+ * Ulaz: dva DC-removed + Hann-windowed kanala (izlaz GCC_ExtractChannels).
+ * Izlaz: kašnjenje u sekundama (+ = sig kasni za ref).
+ *
+ * Ključne odluke:
+ *   - Apsolutni peak: hvata invertiran polaritet kanala (neg. korelacijski vrh).
+ *   - Boundary-aware overlap: za lag τ korelira samo preklapajuće uzorke
+ *     [max(0,-τ) … min(N,N-τ)) — nema padding ili zero-extend.
+ *   - Normalizacija po energiji: dijeli s sqrt(E_ref * E_sig) → corr ∈ [-1,+1].
+ *   - Quality = |peak_corr| / mean(|corr|) po cijelom lag prozoru.
+ *   - Parabolička interpolacija s cirkularnim susjedima za sub-sample preciznost.
+ */
+float NCC_FindTDOA(const float *ref, const float *sig, float *qual_out)
 {
-    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
-        sum0 += (float)buf[s * NUM_CH + 0];
-        sum1 += (float)buf[s * NUM_CH + 1];
-        sum2 += (float)buf[s * NUM_CH + 2];
-        sum3 += (float)buf[s * NUM_CH + 3];
-    }
-    float inv_n = 1.0f / SAMPLES_PER_CHANNEL;
-    float dc0 = sum0 * inv_n;
-    float dc1 = sum1 * inv_n;
-    float dc2 = sum2 * inv_n;
-    float dc3 = sum3 * inv_n;
+    const int N       = SAMPLES_PER_CHANNEL;
+    const int MAX_LAG = TDOA_MAX_SAMPLES;
+    const int N_LAGS  = 2 * MAX_LAG + 1;
 
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
-        ch0[s] = (float)buf[s * NUM_CH + 0] - dc0;
-        ch1[s] = (float)buf[s * NUM_CH + 1] - dc1;
-        ch2[s] = (float)buf[s * NUM_CH + 2] - dc2;
-        ch3[s] = (float)buf[s * NUM_CH + 3] - dc3;
-    }
-}
-
-float NCC_RMS(const float *ch)
-{
-    float acc = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
-        acc += ch[s] * ch[s];
-    }
-    return sqrtf(acc / (float)SAMPLES_PER_CHANNEL);
-}
-
-int32_t NCC_ComputeLag(const float *ref, const float *sig)
-{
+    /* Globalna normalizacija: sqrt(E_ref × E_sig) */
     float e_ref = 0.0f, e_sig = 0.0f;
-    for (int s = 0; s < SAMPLES_PER_CHANNEL; s++) {
+    for (int s = 0; s < N; s++) {
         e_ref += ref[s] * ref[s];
         e_sig += sig[s] * sig[s];
     }
     float norm = sqrtf(e_ref * e_sig);
-    if (norm < 1e-6f) return 0;
+    if (norm < 1e-9f) {
+        if (qual_out) *qual_out = 0.0f;
+        return 0.0f;
+    }
+    float inv_norm = 1.0f / norm;
 
-    float   best_val = -2.0f;
-    int32_t best_lag = 0;
+    /* Izračun xcorr za svaki lag i pohrana za interpolaciju + quality */
+    float xcorr[N_LAGS];
+    float best_abs = 0.0f;
+    int   best_idx = MAX_LAG;   /* sredina niza = lag 0 */
 
-    for (int32_t lag = -TDOA_MAX_SAMPLES; lag <= TDOA_MAX_SAMPLES; lag++) {
-        int s_start = (lag < 0) ? -lag : 0;
-        int s_end   = (lag > 0) ? SAMPLES_PER_CHANNEL - lag : SAMPLES_PER_CHANNEL;
+    for (int lag = -MAX_LAG; lag <= MAX_LAG; lag++) {
+        /* Valjani preklapajući raspon — nema zero-paddinga */
+        int s0 = (lag < 0) ? -lag : 0;
+        int s1 = (lag > 0) ? N - lag : N;
 
         float acc = 0.0f;
-        for (int s = s_start; s < s_end; s++) {
+        for (int s = s0; s < s1; s++) {
             acc += ref[s] * sig[s + lag];
         }
-        acc /= norm;
+        /* Normalizacija: energija × korak za unbiased estimaciju */
+        acc *= inv_norm;
 
-        if (acc > best_val) {
-            best_val = acc;
-            best_lag = lag;
+        int idx     = lag + MAX_LAG;
+        xcorr[idx]  = acc;
+        float a     = fabsf(acc);
+        if (a > best_abs) {
+            best_abs = a;
+            best_idx = idx;
         }
     }
-    return best_lag;
+
+    /* Quality: |peak| / mean(|xcorr|) */
+    if (qual_out) {
+        float sum = 0.0f;
+        for (int i = 0; i < N_LAGS; i++) sum += fabsf(xcorr[i]);
+        float mean = sum / (float)N_LAGS;
+        *qual_out = (mean > 1e-9f) ? (best_abs / mean) : 0.0f;
+    }
+
+    /* Parabolička interpolacija — radi na apsolutnim vrijednostima da uvijek
+     * interpolira prema vrhu, bez obzira na predznak (invertiran kanal). */
+    float delta = 0.0f;
+    if (best_idx > 0 && best_idx < N_LAGS - 1) {
+        float c0 = fabsf(xcorr[best_idx - 1]);
+        float c1 = best_abs;
+        float c2 = fabsf(xcorr[best_idx + 1]);
+        float denom = c0 - 2.0f * c1 + c2;
+        if (fabsf(denom) > 1e-12f) {
+            delta = 0.5f * (c0 - c2) / denom;
+            if (delta >  1.0f) delta =  1.0f;
+            if (delta < -1.0f) delta = -1.0f;
+        }
+    }
+
+    float lag_f = (float)(best_idx - MAX_LAG) + delta;
+    return lag_f * SAMPLE_PERIOD_S;
 }

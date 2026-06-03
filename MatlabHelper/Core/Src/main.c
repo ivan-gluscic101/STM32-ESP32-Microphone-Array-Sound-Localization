@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -91,8 +91,8 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   /* USER CODE BEGIN 2 */
-  AdcCapture_Init();    /* GPIO analog, TIM3 @ 64 kHz, ADC1 scan + calibration */
-  UartStream_Init();    /* USART3 @ 115200 baud + DMA1_Ch2 -> USB-UART adapter  */
+  AdcCapture_Init();    /* GPIO analog, TIM3 @ ~32 kHz, ADC1 scan + continuous DMA */
+  UartStream_Init();    /* USART3 high-speed TX stream + DMA1_Ch2 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -105,15 +105,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    if (AdcCapture_FrameReady())
+    /* Non-blocking continuous stream:
+     * ADC runs all the time in circular DMA.  When UART DMA is free, take the
+     * next completed ADC half-buffer, prepend the sync header and start TX.
+     * Do NOT stop/restart ADC after every frame; that creates gaps.
+     */
+    if (!UartStream_Busy() && AdcCapture_FrameReady())
     {
       UartStream_Send((const uint8_t *)AdcCapture_Buffer(), ADC_TX_BYTES);
-
-      while (UartStream_Busy())
-      {
-      }
-
-      AdcCapture_Start();
     }
   }
   /* USER CODE END 3 */

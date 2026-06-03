@@ -1,422 +1,339 @@
 % =========================================================================
-%  TDOA 3D lokalizacija zvuka - tetrahedral niz mikrofona
-%  STM32G474RE - 4x ADC @ 64 kHz, USART3 binarni tok
-%
-%  Geometrija: pravilni tetraedar, brid = 10 cm
-%    MIC1: (0,     0,      0     )
-%    MIC2: (0.1,   0,      0     )
-%    MIC3: (0.05,  0.0866, 0     )
-%    MIC4: (0.05,  0.0289, 0.0816)
-%
-%  Metoda: GCC-PHAT xcorr za TDOA, zatim A\(c*tau) za 3D smjer
+%  Kontinuirana TDOA lokalizacija izvora zvuka - STM32G474RE + MATLAB
+%  Tok: [0xFF 0xFF 0xFF 0xFF] + 4-kanalni uint16 interleaved ADC blok
 % =========================================================================
 
 clear; clc; close all;
 
 %% -------------------------------------------------------------------------
-%  KONFIGURACIJA
+%  KONFIGURACIJA - MORA odgovarati app_config.h na STM32 strani
 % -------------------------------------------------------------------------
-COM_PORT       = 'COM5';
-BAUD_RATE      = 115200;
+COM_PORT       = "COM5";
+BAUD_RATE      = 3000000;          % FT232RL maksimum je 3 Mbaud
 NUM_CHANNELS   = 4;
 SAMPLES_PER_CH = 1024;
-NUM_FRAMES     = 4;          % 4096 uzoraka/kanalu = 64 ms
-FS             = 64000;      % Hz
+NUM_FRAMES_BUF = 4;                % 4*1024 uzoraka/kanalu za obradu ~=64 ms
+FS             = 170e6 / 5312;     % stvarni TIM3 Fs za ARR=5311: 32003.012 Hz
 
-C_SOUND        = 343.0;      % m/s
-HPF_CUTOFF_HZ  = 300;        % Hz
+C_SOUND        = 343.0;            % m/s, prilagodi za temperaturu po potrebi
+HPF_CUTOFF_HZ  = 300;
+LPF_CUTOFF_HZ  = 10000;            % mora biti < FS/2; za 32 kHz je 10 kHz OK
 
-% Pozicije mikrofona [m] - pravilni tetraedar, brid 10 cm
-EDGE = 0.10;
+% Redoslijed MORA odgovarati ADC rankovima:
+% MIC1 = PB14/ADC1_IN5, MIC2 = PC0/ADC1_IN6, MIC3 = PC1/ADC1_IN7, MIC4 = PC2/ADC1_IN8
 MIC_POS = [
-    0,          0,                       0;
-    EDGE,       0,                       0;
-    EDGE*0.5,   EDGE*0.86602540378,      0;
-    EDGE*0.5,   EDGE*0.28867513459,      EDGE*0.81649658092
+    0,      0,      0;             % MIC1
+    0.0867, 0.05,   0;             % MIC2
+    0.0867,-0.05,   0;             % MIC3
+    0.05,   0,      0.08           % MIC4
 ];
 
-MAX_TDOA_US = EDGE / C_SOUND * 1e6;
-MAX_LAG     = ceil(MAX_TDOA_US * 1e-6 * FS * 1.5);
+% Kalibracijske korekcije po paru MIC1-MICi [us].
+% Ako svi kanali imaju jednaku elektroniku, ostavi 0. Za preciznost izmjeri
+% zvuk iz poznatog smjera i ovdje upiši sustavni offset.
+TDOA_OFFSET_US = [0 0 0];
 
-% Detekcija zvučnog događaja (pljeskanje)
-CLAP_THRESHOLD_DB = 20;     % dB iznad noise floora
-PRE_EVENT_MS      = 8;      % ms prije vrha energije
-POST_EVENT_MS     = 20;     % ms nakon vrha energije
+CLAP_THRESHOLD_DB = 14;             % prag iznad adaptivnog noise floora
+PRE_EVENT_MS      = 8;
+POST_EVENT_MS     = 22;
+REFRACTORY_SEC    = 0.18;           % ne prijavljuj isti impuls više puta
+PLOT_EVERY_N_FRAMES = 2;
 
-% Detekcija i uklanjanje kratkih prekida napajanja (glitch)
-% Glitch = nagla promjena amplitude za > GLITCH_DIFF_FACTOR * median_diff
-% u trajanju od <= GLITCH_MAX_SAMPLES uzoraka
-GLITCH_DIFF_FACTOR = 8;     % faktor iznad medijana apsolutnog diffa
-GLITCH_MAX_SAMPLES = 3;     % maksimalna duljina glitcha koji se interpolira
+SYNC = uint8([255; 255; 255; 255]);
+PAYLOAD_BYTES = NUM_CHANNELS * SAMPLES_PER_CH * 2;
+PACKET_BYTES  = numel(SYNC) + PAYLOAD_BYTES;
+BLOCK_SAMPLES = SAMPLES_PER_CH * NUM_FRAMES_BUF;
 
-bytes_per_frame = NUM_CHANNELS * SAMPLES_PER_CH * 2;
-samples_total   = SAMPLES_PER_CH * NUM_FRAMES;
+max_mic_distance = max_pair_distance(MIC_POS);
+MAX_TDOA_US = max_mic_distance / C_SOUND * 1e6;
+MAX_LAG     = ceil(MAX_TDOA_US * 1e-6 * FS * 1.25);
+
+fprintf("UART brzina: %.1f Mbaud  (FT232RL limit)\n", BAUD_RATE/1e6);
+fprintf("Ocekivani tok: %.1f kB/s payload, %.2f Mbit/s na UART 8N1\n", ...
+    NUM_CHANNELS*FS*2/1000, NUM_CHANNELS*FS*2*10/1e6);
+fprintf("Frame: %d B svakih %.2f ms\n", PACKET_BYTES, SAMPLES_PER_CH/FS*1e3);
 
 %% -------------------------------------------------------------------------
-%  SERIJSKO ČITANJE
+%  SERIJSKI PORT I LIVE BUFFER
 % -------------------------------------------------------------------------
-fprintf('Otvaranje %s @ %d baud...\n', COM_PORT, BAUD_RATE);
-s = serialport(COM_PORT, BAUD_RATE, 'Timeout', 15);
+s = serialport(COM_PORT, BAUD_RATE, "Timeout", 0.20);
+s.ByteOrder = "little-endian";
 flush(s);
 
-fprintf('Trazenje sinkronizacijske zaglavlje...\n');
-win = uint8([0 0 0 0]);
-found = false;
-for k = 1:(2*bytes_per_frame + 16)
-    b   = read(s, 1, 'uint8');
-    win = [win(2:4), uint8(b)];
-    if all(win == 255), found = true; break; end
-end
-if ~found, clear s; error('Sync header nije pronađen.'); end
+rxbuf = uint8([]);
+sigbuf = zeros(BLOCK_SAMPLES, NUM_CHANNELS);
+frames_rx = 0;
+packets_lost_sync = 0;
+last_event_tic = -Inf;
+last_result = struct("az", NaN, "el", NaN, "u", [NaN;NaN;NaN], ...
+                     "tdoa_us", [NaN NaN NaN], "quality", 0);
 
-fprintf('Sync OK. Citanje %d okvira...\n', NUM_FRAMES);
-raw_all = uint8(zeros(bytes_per_frame * NUM_FRAMES, 1));
-raw_all(1:bytes_per_frame) = read(s, bytes_per_frame, 'uint8');
-for f = 2:NUM_FRAMES
-    win2 = uint8([0 0 0 0]);
-    for k = 1:(bytes_per_frame + 16)
-        b2   = read(s, 1, 'uint8');
-        win2 = [win2(2:4), uint8(b2)];
-        if all(win2 == 255), break; end
-    end
-    raw_all((f-1)*bytes_per_frame+1 : f*bytes_per_frame) = read(s, bytes_per_frame, 'uint8');
-end
-clear s;
+[b_bp, a_bp] = butter(3, [HPF_CUTOFF_HZ LPF_CUTOFF_HZ]/(FS/2), "bandpass");
+
+fig = figure("Name", "Kontinuirana TDOA lokalizacija", "Color", "w", ...
+             "Position", [40 60 1180 760]);
+tiledlayout(fig, 3, 2, "TileSpacing", "compact", "Padding", "compact");
+axRaw = nexttile(1, [1 2]); grid(axRaw,"on"); hold(axRaw,"on");
+axE   = nexttile(3); grid(axE,"on"); hold(axE,"on");
+axT   = nexttile(4); grid(axT,"on"); hold(axT,"on");
+axD   = nexttile(5, [1 2]); grid(axD,"on"); hold(axD,"on"); axis(axD,"equal");
+view(axD, 35, 22);
+
+fprintf("\nCekam kontinuirani stream. Za prekid zatvori figure ili pritisni Ctrl+C.\n");
 
 %% -------------------------------------------------------------------------
-%  PARSIRANJE
+%  GLAVNA PETLJA
 % -------------------------------------------------------------------------
-ch = cell(1, NUM_CHANNELS);
-for i = 1:NUM_CHANNELS, ch{i} = zeros(samples_total, 1); end
-for f = 1:NUM_FRAMES
-    seg  = raw_all((f-1)*bytes_per_frame+1 : f*bytes_per_frame);
-    u16  = uint16(seg(1:2:end)) + uint16(seg(2:2:end)) * 256;
-    mat  = reshape(u16, NUM_CHANNELS, SAMPLES_PER_CH)';
-    idx0 = (f-1)*SAMPLES_PER_CH;
-    for i = 1:NUM_CHANNELS
-        ch{i}(idx0+1 : idx0+SAMPLES_PER_CH) = double(mat(:,i));
-    end
-end
-fprintf('Parsirano: %d uzoraka/kanalu (%.1f ms).\n', samples_total, samples_total/FS*1e3);
-
-%% -------------------------------------------------------------------------
-%  DETEKCIJA I UKLANJANJE KRATKIH PREKIDA NAPAJANJA (GLITCH)
-%
-%  Kratki prekid napajanja izgleda ovako u sirovalim podacima:
-%    ... 3100  3105  3102  [12]  [18]  3098  3103 ...
-%                          ^^^^^^^^^^^^^
-%                          1-2 uzorka gdje ADC čita krivi napon
-%
-%  Algoritam:
-%    1. Izračunaj apsolutnu razliku između susjednih uzoraka: d = |diff(x)|
-%    2. Prag: GLITCH_DIFF_FACTOR * median(d)  [adaptivno po kanalu]
-%    3. Pronađi mjesta gdje d > prag (ulaz i izlaz glitcha)
-%    4. Ako su dva uzastopna prevelika skoka na udaljenosti <= GLITCH_MAX_SAMPLES
-%       -> taj segment je glitch -> linearna interpolacija između rubova
-%
-%  Glitchevi koji traju dulje od GLITCH_MAX_SAMPLES se NE diraju
-%  (mogli bi biti pravi akustički tranzijent).
-% -------------------------------------------------------------------------
-ch_raw = ch;   % čuvamo sirove podatke za Graf 1 usporedbu
-glitch_mask = cell(1, NUM_CHANNELS);  % za iscrtavanje na grafu
-
-fprintf('\n--- Detekcija glitch uzoraka ---\n');
-for i = 1:NUM_CHANNELS
-    [ch{i}, glitch_mask{i}, n_fixed] = remove_glitches(ch{i}, ...
-        GLITCH_DIFF_FACTOR, GLITCH_MAX_SAMPLES);
-    if n_fixed > 0
-        fprintf('  MIC%d: popravljeno %d glitch segmenata\n', i, n_fixed);
+while isvalid(fig)
+    n = s.NumBytesAvailable;
+    if n > 0
+        newBytes = read(s, n, "uint8");
+        rxbuf = [rxbuf; uint8(newBytes(:))]; %#ok<AGROW>
     else
-        fprintf('  MIC%d: nema glitcheva\n', i);
+        pause(0.002);
     end
-end
 
-%% -------------------------------------------------------------------------
-%  HIGH-PASS FILTRIRANJE
-% -------------------------------------------------------------------------
-[b_h, a_h] = butter(2, HPF_CUTOFF_HZ/(FS/2), 'high');
-ch_f = cellfun(@(x) filtfilt(b_h, a_h, x), ch, 'uni', 0);
+    [frames, rxbuf, lost_sync_now] = parse_packets(rxbuf, SYNC, PAYLOAD_BYTES, ...
+                                                   NUM_CHANNELS, SAMPLES_PER_CH);
+    packets_lost_sync = packets_lost_sync + lost_sync_now;
 
-%% -------------------------------------------------------------------------
-%  DETEKCIJA ZVUČNOG DOGAĐAJA (STE energija)
-% -------------------------------------------------------------------------
-ste_win  = round(2e-3 * FS);
-ste_hop  = round(ste_win / 2);
-n_ste    = floor((samples_total - ste_win) / ste_hop) + 1;
-ste_lin  = zeros(1, n_ste);
-for k = 1:n_ste
-    idx = (k-1)*ste_hop + (1:ste_win);
-    e = 0;
-    for i = 1:NUM_CHANNELS, e = e + sum(ch_f{i}(idx).^2); end
-    ste_lin(k) = e / (ste_win * NUM_CHANNELS);
-end
-ste_dB     = 10 * log10(ste_lin + 1e-10);
-nf_dB      = prctile(ste_dB, 20);
-thr_dB     = nf_dB + CLAP_THRESHOLD_DB;
-t_ste_ms   = ((0:n_ste-1)*ste_hop + ste_win/2) / FS * 1e3;
+    for k = 1:numel(frames)
+        frame = frames{k};
+        frames_rx = frames_rx + 1;
+        sigbuf = [sigbuf(SAMPLES_PER_CH+1:end, :); frame]; %#ok<AGROW>
 
-[~, pk_ste]  = max(ste_lin);
-peak_sample  = round((pk_ste-1)*ste_hop + ste_win/2);
-win_start    = max(1, peak_sample - round(PRE_EVENT_MS  * 1e-3 * FS));
-win_end      = min(samples_total, peak_sample + round(POST_EVENT_MS * 1e-3 * FS));
-ch_win       = cellfun(@(x) x(win_start:win_end), ch_f, 'uni', 0);
+        if frames_rx < NUM_FRAMES_BUF
+            continue;
+        end
 
-event_detected = max(ste_dB) > thr_dB;
-if event_detected
-    fprintf('\n[DETEKTIRAN] Zvucni dogadaj @ %.1f ms, xcorr prozor: %.1f-%.1f ms\n', ...
-            peak_sample/FS*1e3, win_start/FS*1e3, win_end/FS*1e3);
-else
-    fprintf('\n[UPOZORENJE] Nije detektiran zvuk iznad praga (%+.0f dB).\n', CLAP_THRESHOLD_DB);
-    fprintf('  Povecaj glasnocu ili smanji CLAP_THRESHOLD_DB.\n');
-end
+        [result, event_detected, proc] = process_tdoa_block(sigbuf, FS, C_SOUND, ...
+            MIC_POS, MAX_LAG, TDOA_OFFSET_US, b_bp, a_bp, CLAP_THRESHOLD_DB, ...
+            PRE_EVENT_MS, POST_EVENT_MS);
 
-%% -------------------------------------------------------------------------
-%  PROVJERA KVALITETE SIGNALA
-% -------------------------------------------------------------------------
-fprintf('\n--- Kvaliteta signala ---\n');
-for i = 1:NUM_CHANNELS
-    fprintf('  MIC%d: DC=%.0f  vr-vr=%4.0f  RMS(fil)=%5.1f\n', ...
-            i, mean(ch{i}), max(ch{i})-min(ch{i}), rms(ch_f{i}));
-end
+        tnow = toc_or_zero();
+        if event_detected && (tnow - last_event_tic) > REFRACTORY_SEC
+            last_event_tic = tnow;
+            last_result = result;
+            fprintf("[%7.2fs] Azimut=%+7.2f deg | Elevacija=%+7.2f deg | TDOA=[%+7.2f %+7.2f %+7.2f] us | Q=%.2f\n", ...
+                tnow, result.az, result.el, result.tdoa_us(1), result.tdoa_us(2), ...
+                result.tdoa_us(3), result.quality);
+        end
 
-%% -------------------------------------------------------------------------
-%  GCC-PHAT TDOA MJERENJE
-% -------------------------------------------------------------------------
-tdoa_samples = zeros(1, NUM_CHANNELS-1);
-tdoa_us      = zeros(1, NUM_CHANNELS-1);
-tdoa_peak    = zeros(1, NUM_CHANNELS-1);
-
-fprintf('\n--- GCC-PHAT TDOA (ref: MIC1, max lag: +/-%d uzoraka) ---\n', MAX_LAG);
-for i = 2:NUM_CHANNELS
-    [xc, lags]        = gcc_phat(ch_win{1}, ch_win{i}, MAX_LAG);
-    [pk, idx]         = max(xc);
-    tdoa_samples(i-1) = lags(idx);
-    tdoa_us(i-1)      = lags(idx) / FS * 1e6;
-    tdoa_peak(i-1)    = pk;
-    fprintf('  MIC1-MIC%d: %+d uzoraka | %+.2f us | vrh=%.3f\n', ...
-            i, tdoa_samples(i-1), tdoa_us(i-1), pk);
-end
-
-%% -------------------------------------------------------------------------
-%  3D DOA PROCJENA
-% -------------------------------------------------------------------------
-A_mat = MIC_POS(1,:) - MIC_POS(2:end,:);
-tau_s = (tdoa_us * 1e-6)';
-u_est = A_mat \ (C_SOUND * tau_s);
-u_n   = norm(u_est);
-if u_n < 0.01
-    warning('Vektor smjera je gotovo nula.');
-    u_unit = [0; 0; 1];
-else
-    u_unit = max(-1, min(1, u_est / u_n));
-end
-azimuth_deg   = atan2d(u_unit(2), u_unit(1));
-elevation_deg = asind(u_unit(3));
-
-fprintf('\n=> Smjer dolaska zvuka: Azimut=%+.1f deg  Elevacija=%+.1f deg\n', ...
-        azimuth_deg, elevation_deg);
-
-%% =========================================================================
-%  GRAFOVI
-% =========================================================================
-t_ms   = (0:samples_total-1) / FS * 1e3;
-colors = lines(NUM_CHANNELS);
-
-%--------------------------------------------------------------------------
-%  FIGURA 1: Pregled signala
-%
-%  [1] Sirovi signali PRIJE korekcije
-%      Glitch uzorci su označeni crvenim križićima - provjeri da algoritam
-%      ispravno pronalazi kratke prekide napajanja.
-%      Ako su označeni pravi tranzijenti (pljeskanje) -> povećaj GLITCH_MAX_SAMPLES
-%      ili GLITCH_DIFF_FACTOR da ih ne briše.
-%
-%  [2] Signali NAKON korekcije glitcheva (ali još bez HPF)
-%      Interpolirani segmenti bi trebali glatko premostiti prekid.
-%
-%  [3] STE energija s pragom i xcorr prozorom
-%
-%  [4] Zoom xcorr prozora (filtrirano) - traži vremenski pomak
-%--------------------------------------------------------------------------
-figure('Name','Fig 1 - Pregled signala','Color','w','Position',[20 20 1050 950]);
-
-subplot(4,1,1); hold on; grid on;
-for i = 1:NUM_CHANNELS
-    plot(t_ms, ch_raw{i}, 'Color', colors(i,:));
-end
-for i = 1:NUM_CHANNELS
-    gm = glitch_mask{i};
-    if any(gm)
-        plot(t_ms(gm), ch_raw{i}(gm), 'rx', 'MarkerSize', 8, 'LineWidth', 2);
-    end
-end
-title('Sirovi signali PRIJE korekcije — crveni x = detektirani glitch uzorci');
-xlabel('Vrijeme [ms]'); ylabel('ADC koraci');
-lh = legend(arrayfun(@(i)sprintf('MIC%d',i),1:NUM_CHANNELS,'uni',0),'Location','northeast');
-if any(cellfun(@any, glitch_mask))
-    legend([lh.String, {'Glitch'}], 'Location','northeast');
-end
-
-subplot(4,1,2); hold on; grid on;
-for i = 1:NUM_CHANNELS
-    plot(t_ms, ch{i}, 'Color', colors(i,:));
-end
-title(sprintf('Signali NAKON korekcije glitcheva (prije HPF filtra)'));
-xlabel('Vrijeme [ms]'); ylabel('ADC koraci');
-legend(arrayfun(@(i)sprintf('MIC%d',i),1:NUM_CHANNELS,'uni',0),'Location','northeast');
-
-subplot(4,1,3); hold on; grid on;
-plot(t_ste_ms, ste_dB, 'b-', 'LineWidth',1.2, 'DisplayName','STE energija');
-yline(nf_dB,  'g--', 'LineWidth',1.2, 'DisplayName','Noise floor (20. pct)');
-yline(thr_dB, 'r-',  'LineWidth',1.5, 'DisplayName',sprintf('Prag (+%d dB)',CLAP_THRESHOLD_DB));
-yl = ylim;
-patch([win_start/FS*1e3, win_end/FS*1e3, win_end/FS*1e3, win_start/FS*1e3], ...
-      [yl(1), yl(1), yl(2), yl(2)], [1 0.9 0.3], ...
-      'FaceAlpha',0.25, 'EdgeColor','none', 'DisplayName','GCC-PHAT prozor');
-xline(peak_sample/FS*1e3, 'm--', 'LineWidth',1.2, 'DisplayName','Vrh energije');
-if event_detected
-    title(sprintf('STE energija — DETEKTIRAN zvuk @ %.1f ms', peak_sample/FS*1e3));
-else
-    title('STE energija — NIJE detektiran zvuk (provjeri CLAP_THRESHOLD_DB)');
-end
-xlabel('Vrijeme [ms]'); ylabel('Energija [dB]');
-legend('Location','northeast'); xlim([0 samples_total/FS*1e3]);
-
-subplot(4,1,4); hold on; grid on;
-t_win_us = (0:numel(ch_win{1})-1) / FS * 1e6;
-for i = 1:NUM_CHANNELS
-    plot(t_win_us, ch_win{i}, '-o', 'Color', colors(i,:), 'MarkerSize', 2);
-end
-title('Zoom: xcorr prozor (filtrirano) — traži pomak između krivulja');
-xlabel('Vrijeme [\mus]'); ylabel('ADC koraci');
-legend(arrayfun(@(i)sprintf('MIC%d',i),1:NUM_CHANNELS,'uni',0),'Location','northeast');
-
-%--------------------------------------------------------------------------
-%  FIGURA 2: GCC-PHAT TDOA analiza
-%--------------------------------------------------------------------------
-figure('Name','Fig 2 - GCC-PHAT TDOA analiza','Color','w','Position',[20 1020 1050 560]);
-
-for i = 2:NUM_CHANNELS
-    subplot(2, 2, i-1); hold on; grid on;
-    [xc, lags_s] = gcc_phat(ch_win{1}, ch_win{i}, MAX_LAG);
-    plot(lags_s/FS*1e6, xc, 'b-', 'LineWidth',1.2);
-    xline(tdoa_us(i-1), 'r--', 'LineWidth',1.5);
-    plot(tdoa_us(i-1), tdoa_peak(i-1), 'rv', 'MarkerSize',9, 'MarkerFaceColor','r');
-    xlim([-MAX_LAG MAX_LAG]/FS*1e6);
-    title(sprintf('MIC1 vs MIC%d:  %+d uzoraka  (%+.1f \\mus)', ...
-          i, tdoa_samples(i-1), tdoa_us(i-1)));
-    xlabel('Pomak [\mus]'); ylabel('GCC-PHAT');
-    text(0.02,0.93,sprintf('vrh=%.3f',tdoa_peak(i-1)), ...
-         'Units','normalized','FontSize',8,'Color','r','FontWeight','bold');
-end
-
-subplot(2,2,4); hold on; grid on;
-b_bar = bar(1:NUM_CHANNELS-1, tdoa_us, 0.5, 'FaceColor','flat');
-for i = 1:NUM_CHANNELS-1, b_bar.CData(i,:) = colors(i+1,:); end
-yline(0,'k--'); yline(MAX_TDOA_US,'r:','LineWidth',1.5); yline(-MAX_TDOA_US,'r:','LineWidth',1.5);
-ylim([-MAX_TDOA_US*1.4 MAX_TDOA_US*1.4]);
-for i = 1:NUM_CHANNELS-1
-    off = sign(tdoa_us(i)+0.01) * MAX_TDOA_US * 0.18;
-    text(i, tdoa_us(i)+off, sprintf('%.1f \\mus',tdoa_us(i)), ...
-         'HorizontalAlignment','center','FontSize',9,'FontWeight','bold');
-end
-set(gca,'XTick',1:NUM_CHANNELS-1, ...
-    'XTickLabel',arrayfun(@(i)sprintf('MIC1 vs MIC%d',i+1),1:NUM_CHANNELS-1,'uni',0));
-title('TDOA sažetak relativno na MIC1'); ylabel('Kašnjenje [\mus]');
-text(0.5, MAX_TDOA_US*1.1, sprintf('+/- %.0f \\mus (max)',MAX_TDOA_US),'Color','r','FontSize',8);
-
-%--------------------------------------------------------------------------
-%  FIGURA 3: 3D smjer dolaska zvuka
-%--------------------------------------------------------------------------
-figure('Name','Fig 3 - 3D smjer dolaska zvuka','Color','w','Position',[1090 20 560 560]);
-hold on; grid on; axis equal;
-
-[xs,ys,zs] = sphere(40);
-surf(xs,ys,zs,'FaceAlpha',0.07,'EdgeAlpha',0.04,'FaceColor',[0.7 0.8 1]);
-quiver3(0,0,0,1.25,0,0,0,'k-','LineWidth',1.2); text(1.35,0,0,'X','FontSize',9);
-quiver3(0,0,0,0,1.25,0,0,'k-','LineWidth',1.2); text(0,1.35,0,'Y','FontSize',9);
-quiver3(0,0,0,0,0,1.25,0,'k-','LineWidth',1.2); text(0,0,1.35,'Z','FontSize',9);
-
-mic_sc = 0.12 / (EDGE*0.5);
-mic_c  = mean(MIC_POS,1);
-for i = 1:NUM_CHANNELS
-    mp = (MIC_POS(i,:) - mic_c) * mic_sc;
-    plot3(mp(1),mp(2),mp(3),'s','Color',colors(i,:),'MarkerSize',10,'MarkerFaceColor',colors(i,:));
-    text(mp(1)+0.06,mp(2)+0.06,mp(3)+0.04,sprintf('M%d',i),'Color',colors(i,:),'FontSize',9,'FontWeight','bold');
-end
-plot3([0 u_unit(1)],[0 u_unit(2)],[0 0],'r:','LineWidth',1);
-plot3(u_unit(1),u_unit(2),0,'r+','MarkerSize',12,'LineWidth',2);
-quiver3(0,0,0,u_unit(1),u_unit(2),u_unit(3),0,'r','LineWidth',4,'MaxHeadSize',0.35);
-view(35,22);
-xlabel('X'); ylabel('Y'); zlabel('Z');
-title(sprintf('3D smjer dolaska zvuka\nAzimut: %+.1f°   |   Elevacija: %+.1f°', ...
-      azimuth_deg, elevation_deg),'FontSize',11);
-annotation('textbox',[0.03 0.03 0.42 0.13],'String', ...
-    {sprintf('Azimut:     %+.1f°', azimuth_deg), ...
-     sprintf('Elevacija:   %+.1f°', elevation_deg), ...
-     sprintf('Vec: [%+.2f, %+.2f, %+.2f]', u_unit(1), u_unit(2), u_unit(3))}, ...
-    'FontSize',9,'BackgroundColor','w','EdgeColor',[0.6 0.6 0.6]);
-
-%% =========================================================================
-%  LOKALNE FUNKCIJE
-% =========================================================================
-
-% Detektira kratke glitch uzorke i zamjenjuje ih linearnom interpolacijom.
-% Glitch = nagla promjena amplitude u trajanju <= max_len uzoraka.
-% Vraća: popravljeni signal, logičku masku glitch pozicija, broj popravljenih.
-function [x, mask, n_fixed] = remove_glitches(x, diff_factor, max_len)
-    mask    = false(size(x));
-    n_fixed = 0;
-    N       = length(x);
-
-    d      = abs(diff(x));
-    thresh = diff_factor * median(d);   % adaptivni prag po kanalu
-
-    % Pronađi sve uzorke gdje je razlika prema susjedu prevelika
-    big_jumps = find(d > thresh);       % pozicije skoka (ulaz ILI izlaz glitcha)
-
-    k = 1;
-    while k <= length(big_jumps)
-        entry = big_jumps(k);           % potencijalni ulaz u glitch
-
-        % Tražimo izlaz: sljedeći veliki skok unutar max_len koraka
-        exits = big_jumps(big_jumps > entry & big_jumps <= entry + max_len);
-
-        if ~isempty(exits)
-            ex = exits(1);              % izlaz iz glitcha (entry+1 do entry+max_len)
-
-            % Granice interpolacije: jedan uzorak s lijeve i desne strane
-            left  = entry;              % zadnji "dobri" uzorak (prije glitcha)
-            right = ex + 1;             % prvi "dobri" uzorak (nakon glitcha)
-
-            if left >= 1 && right <= N
-                n_bad = right - left - 1;       % broj uzoraka koje trebamo popraviti
-                if n_bad >= 1 && n_bad <= max_len
-                    vals = linspace(x(left), x(right), n_bad + 2);
-                    x(left+1 : right-1) = vals(2:end-1);
-                    mask(left+1 : right-1) = true;
-                    n_fixed = n_fixed + 1;
-                end
-            end
-
-            % Preskoči sve big_jumps do iza ex
-            k = find(big_jumps > ex, 1);
-            if isempty(k), break; end
-        else
-            k = k + 1;
+        if mod(frames_rx, PLOT_EVERY_N_FRAMES) == 0
+            update_plots(axRaw, axE, axT, axD, sigbuf, proc, last_result, frames_rx, ...
+                         packets_lost_sync, FS, MIC_POS, MAX_TDOA_US);
+            drawnow limitrate;
         end
     end
 end
 
-% GCC-PHAT međukorelacija
-function [xc, lags] = gcc_phat(x, y, max_l)
-    N = 2^nextpow2(2*length(x));
-    X = fft(x - mean(x), N);
-    Y = fft(y - mean(y), N);
-    G = X .* conj(Y);
-    G = G ./ (abs(G) + 1e-9);
+clear s;
+
+%% =========================================================================
+%  LOKALNE FUNKCIJE
+% =========================================================================
+function [frames, rxbuf, lost_sync] = parse_packets(rxbuf, sync, payload_bytes, n_ch, n_samp)
+    frames = {};
+    lost_sync = 0;
+    packet_bytes = numel(sync) + payload_bytes;
+
+    while numel(rxbuf) >= numel(sync)
+        idx = find_sync(rxbuf, sync);
+        if isempty(idx)
+            % Zadrzi zadnja 3 bajta za slučaj da sync počinje na granici čitanja.
+            keep = min(numel(rxbuf), numel(sync)-1);
+            lost_sync = lost_sync + max(0, numel(rxbuf) - keep);
+            rxbuf = rxbuf(end-keep+1:end);
+            return;
+        end
+
+        if idx > 1
+            lost_sync = lost_sync + idx - 1;
+            rxbuf = rxbuf(idx:end);
+        end
+
+        if numel(rxbuf) < packet_bytes
+            return;
+        end
+
+        payload = rxbuf(numel(sync)+1 : packet_bytes);
+        rxbuf = rxbuf(packet_bytes+1:end);
+
+        u16 = typecast(uint8(payload), "uint16");
+        mat = reshape(double(u16), n_ch, n_samp).';
+        frames{end+1} = mat; %#ok<AGROW>
+    end
+end
+
+function idx = find_sync(buf, sync)
+    idx = [];
+    if numel(buf) < numel(sync)
+        return;
+    end
+    hit = strfind(buf(:).', sync(:).');
+    if ~isempty(hit)
+        idx = hit(1);
+    end
+end
+
+function [result, event_detected, proc] = process_tdoa_block(x_raw, fs, c, mic_pos, max_lag, tdoa_offset_us, b, a, thr_add_db, pre_ms, post_ms)
+    x = double(x_raw);
+    x = x - median(x, 1);
+    x_f = filtfilt(b, a, x);
+
+    energy = mean(x_f.^2, 2);
+    env_win = max(8, round(0.8e-3 * fs));
+    env = movmean(energy, env_win);
+    env_db = 10*log10(env + eps);
+    nf_db = prctile(env_db, 20);
+    thr_db = nf_db + thr_add_db;
+    [pk_db, peak_sample] = max(env_db);
+    event_detected = pk_db > thr_db;
+
+    win_start = max(1, peak_sample - round(pre_ms*1e-3*fs));
+    win_end   = min(size(x_f,1), peak_sample + round(post_ms*1e-3*fs));
+    if win_end - win_start + 1 < 128
+        win_start = max(1, peak_sample - 64);
+        win_end = min(size(x_f,1), peak_sample + 64);
+    end
+    xw = x_f(win_start:win_end, :);
+
+    tdoa_samples = zeros(1,3);
+    tdoa_us = zeros(1,3);
+    peak_val = zeros(1,3);
+    for i = 2:4
+        [xc, lags] = gcc_phat_delay(xw(:,1), xw(:,i), max_lag);
+        [pk, ix] = max(xc);
+        lag = refine_peak(lags, xc, ix);
+        tdoa_samples(i-1) = lag;
+        tdoa_us(i-1) = lag / fs * 1e6 - tdoa_offset_us(i-1);
+        peak_val(i-1) = pk;
+    end
+
+    A = mic_pos(1,:) - mic_pos(2:end,:);
+    tau_s = tdoa_us(:) * 1e-6;
+    u = A \ (c * tau_s);
+
+    % Ako šum da normu > 1, projekcija na jedinicnu kuglu daje najbliži DOA.
+    nu = norm(u);
+    if nu < 1e-9
+        u_unit = [NaN; NaN; NaN];
+        az = NaN; el = NaN;
+    else
+        u_unit = u / max(1, nu);
+        u_unit = u_unit / norm(u_unit);
+        az = atan2d(u_unit(2), u_unit(1));
+        el = asind(max(-1, min(1, u_unit(3))));
+    end
+
+    physically_ok = all(abs(tdoa_us) <= 1.10 * max_pair_distance(mic_pos)/c*1e6);
+    quality = mean(peak_val) * double(physically_ok) * double(event_detected);
+
+    result = struct("az", az, "el", el, "u", u_unit, "tdoa_us", tdoa_us, ...
+                    "quality", quality, "tdoa_samples", tdoa_samples, ...
+                    "peak", peak_val);
+    proc = struct("x_f", x_f, "env_db", env_db, "nf_db", nf_db, "thr_db", thr_db, ...
+                  "peak_sample", peak_sample, "win_start", win_start, "win_end", win_end, ...
+                  "event", event_detected);
+end
+
+function [xc, lags] = gcc_phat_delay(ref, sig, max_lag)
+    % Pozitivan lag znaci: sig kasni za ref, tj. t_sig - t_ref > 0.
+    ref = ref(:) - mean(ref);
+    sig = sig(:) - mean(sig);
+    n = 2^nextpow2(numel(ref) + numel(sig));
+    REF = fft(ref, n);
+    SIG = fft(sig, n);
+    G = SIG .* conj(REF);
+    G = G ./ (abs(G) + 1e-12);
     r = real(ifft(G));
-    r = [r(end-max_l+1:end); r(1:max_l+1)];
-    lags = (-max_l:max_l)';
-    xc   = r;
+    r = [r(end-max_lag+1:end); r(1:max_lag+1)];
+    lags = (-max_lag:max_lag).';
+    xc = r(:);
+end
+
+function lag = refine_peak(lags, xc, ix)
+    lag = double(lags(ix));
+    if ix <= 1 || ix >= numel(xc)
+        return;
+    end
+    y1 = xc(ix-1); y2 = xc(ix); y3 = xc(ix+1);
+    den = y1 - 2*y2 + y3;
+    if abs(den) > 1e-12
+        frac = 0.5 * (y1 - y3) / den;
+        if abs(frac) <= 1
+            lag = lag + frac;
+        end
+    end
+end
+
+function update_plots(axRaw, axE, axT, axD, sigbuf, proc, result, frames_rx, lost_sync, fs, mic_pos, max_tdoa_us)
+    t_ms = (0:size(sigbuf,1)-1)/fs*1e3;
+
+    cla(axRaw);
+    plot(axRaw, t_ms, sigbuf - median(sigbuf,1));
+    title(axRaw, sprintf("Kontinuirani ADC tok | frame=%d | izgubljeni sync bajtovi=%d", frames_rx, lost_sync));
+    xlabel(axRaw, "Vrijeme [ms]"); ylabel(axRaw, "ADC - median");
+    legend(axRaw, "MIC1", "MIC2", "MIC3", "MIC4", "Location", "northeast");
+    grid(axRaw,"on");
+
+    cla(axE);
+    tt = (0:numel(proc.env_db)-1)/fs*1e3;
+    plot(axE, tt, proc.env_db, "LineWidth", 1.0); hold(axE,"on");
+    yline(axE, proc.nf_db, "--"); yline(axE, proc.thr_db, "-");
+    xline(axE, proc.peak_sample/fs*1e3, "--");
+    xline(axE, proc.win_start/fs*1e3, ":"); xline(axE, proc.win_end/fs*1e3, ":");
+    title(axE, "Energija i detekcija dogadaja");
+    xlabel(axE, "Vrijeme [ms]"); ylabel(axE, "dB"); grid(axE,"on");
+
+    cla(axT);
+    bar(axT, 1:3, result.tdoa_us);
+    yline(axT, max_tdoa_us, "r:"); yline(axT, -max_tdoa_us, "r:"); yline(axT, 0, "k--");
+    xticks(axT, 1:3); xticklabels(axT, {"M1-M2", "M1-M3", "M1-M4"});
+    ylabel(axT, "TDOA [us]");
+    title(axT, sprintf("Az=%+.1f deg, El=%+.1f deg, Q=%.2f", result.az, result.el, result.quality));
+    grid(axT,"on");
+
+    cla(axD); hold(axD,"on"); grid(axD,"on"); axis(axD,"equal");
+    [xs,ys,zs] = sphere(24);
+    surf(axD, xs, ys, zs, "FaceAlpha", 0.06, "EdgeAlpha", 0.05);
+    quiver3(axD,0,0,0,1.15,0,0,0,"k"); text(axD,1.25,0,0,"X");
+    quiver3(axD,0,0,0,0,1.15,0,0,"k"); text(axD,0,1.25,0,"Y");
+    quiver3(axD,0,0,0,0,0,1.15,0,"k"); text(axD,0,0,1.25,"Z");
+
+    center = mean(mic_pos,1);
+    scale = 1.3 / max_pair_distance(mic_pos);
+    mp = (mic_pos - center) * scale;
+    plot3(axD, mp(:,1), mp(:,2), mp(:,3), "ks", "MarkerFaceColor", "y", "MarkerSize", 7);
+    for i = 1:4
+        text(axD, mp(i,1), mp(i,2), mp(i,3), sprintf(" M%d", i));
+    end
+
+    if all(isfinite(result.u))
+        quiver3(axD, 0,0,0, result.u(1), result.u(2), result.u(3), 0, "r", "LineWidth", 3, "MaxHeadSize", 0.35);
+        plot3(axD, [0 result.u(1)], [0 result.u(2)], [0 0], "r:");
+    end
+    xlabel(axD,"X"); ylabel(axD,"Y"); zlabel(axD,"Z");
+    title(axD, "Smjer dolaska zvuka");
+    xlim(axD,[-1.2 1.2]); ylim(axD,[-1.2 1.2]); zlim(axD,[-1.2 1.2]);
+    view(axD,35,22);
+end
+
+function dmax = max_pair_distance(p)
+    dmax = 0;
+    for i = 1:size(p,1)
+        for j = i+1:size(p,1)
+            dmax = max(dmax, norm(p(i,:) - p(j,:)));
+        end
+    end
+end
+
+function t = toc_or_zero()
+    persistent t0
+    if isempty(t0)
+        t0 = tic;
+        t = 0;
+    else
+        t = toc(t0);
+    end
 end

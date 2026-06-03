@@ -2,32 +2,9 @@
 #define UART_DRIVER_H
 
 #include "main.h"
-#include "audio_common.h"
 #include <stdint.h>
 
-#define FRAME_SOF1    ((uint8_t)0xAA)
-#define FRAME_SOF2    ((uint8_t)0xBB)
-#define FRAME_EOF1    ((uint8_t)0xCC)
-#define FRAME_EOF2    ((uint8_t)0xDD)
-
-/* Svaki FRAME_SKIP half-buffer eventa šaljemo jedan audio frame.
- * Half-buffer = 512 uzoraka @ 64 kHz = 8 ms.
- * FRAME_SKIP=16 → jedan frame svakih 128 ms (~7.8 FPS).
- * Frame = 4102 B → ~44.5 ms @ 921600 baud < 128 ms. */
-#define FRAME_SKIP    16
-
-typedef struct {
-    int16_t  phi_tenth_deg;
-    uint8_t  strength;
-    uint8_t  angle_valid;
-#if SEND_AUDIO_FRAMES
-    uint16_t audio_snapshot[HALF_BUFFER];
-    uint8_t  send_audio;
-#endif
-} uart_msg_t;
-
 void Custom_UART4_Init(void);
-void UART_SendFrame(const uint16_t *buf, uint32_t samples_per_ch, uint16_t fid);
 void UART_SendAnglePacket(int16_t phi_tenth_deg, uint8_t strength);
 
 /*

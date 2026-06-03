@@ -5,8 +5,13 @@
 #define NUM_CH                4
 #define SAMPLES_PER_CHANNEL   1024
 #define HALF_SIZE             SAMPLES_PER_CHANNEL
-#define HALF_BUFFER           (NUM_CH * SAMPLES_PER_CHANNEL)   /* 2048 uzoraka */
-#define FULL_BUFFER           (HALF_BUFFER * 2)                /* 4096 uzoraka */
+#define HALF_BUFFER           (NUM_CH * SAMPLES_PER_CHANNEL)   /* 4096 uzoraka */
+#define FULL_BUFFER           (HALF_BUFFER * 2)                /* 8192 uzoraka */
+
+/* ── Build konfiguracija ──────────────────────────────────────────────────────
+ * 1 = ACQ_Task koristi sintetičke pljeskove iz mock_adc (bez mikrofona); to
+ *     alocira ~68 KB tablica u BSS. 0 = pravi ADC podaci (mock se ne kompajlira). */
+#define USE_MOCK_ADC          0
 
 /* ── Vremenski parametri ───────────────────────────────────────────────────── */
 /* TIM8 ARR=2655 @ 170 MHz → okida ADC svakih 15.625 µs = 64 kHz po kanalu   */
@@ -21,38 +26,45 @@
 /* ── Akustika ──────────────────────────────────────────────────────────────── */
 #define SPEED_OF_SOUND        343.0f    /* m/s pri ~20°C */
 
-/* ── Geometrija mikrofona — tetraedarski raspored ─────────────────────────── */
-/* Brid tetraedra = 10 cm; M1 u ishodištu koordinatnog sustava.               */
-/*                                                                              */
-/*   M1 (0,0,0) ─── M2 (10cm, 0, 0)                                           */
-/*        │                                                                     */
-/*   M3 (5cm, 8.66cm, 0)   M4 (5cm, 2.89cm, 8.16cm)                          */
-/*                                                                              */
-/* ADC redosljed: RANK1=M1(PB14), RANK2=M2(PC0), RANK3=M3(PC1), RANK4=M4(PC2)*/
-#define MIC_TETRA_EDGE        0.10f
-#define MIC_DIST_M            MIC_TETRA_EDGE  /* za 2D lokalizaciju (M1-M2)  */
+/* ── Geometrija mikrofona ─────────────────────────────────────────────────────
+ * Izmjerene pozicije fizičkog niza (vrijednosti u cm → m). M1 je u ishodištu
+ * (referentni mikrofon za TDOA). Baza M1-M2-M3 je ~jednakostraničan trokut
+ * (bridovi ~10 cm), M4 je vrh iznad baze.
+ *
+ *   M1 = ( 0.00,  0.00, 0.00) cm   RANK1, PB14
+ *   M2 = ( 8.67,  5.00, 0.00) cm   RANK2, PC0
+ *   M3 = ( 8.67, −5.00, 0.00) cm   RANK3, PC1
+ *   M4 = ( 5.00,  0.00, 8.00) cm   RANK4, PC2   (vrh)
+ *
+ * Azimut = atan2(y, x); elevacija = asin(z). Izlaz az_tenth ∈ [-1800,+1800]
+ * tenths, tj. raspon [-180°, +180°] (NE 0-360°):
+ *   +X →    0°  naprijed (bisektrisa između M2 i M3)
+ *   +Y →  +90°  M2 strana (lijevo)
+ *   −Y →  −90°  M3 strana (desno)
+ *   −X → ±180°  M1 strana (nazad)
+ *   +Z → elevacija +90°  gore (M4)
+ *
+ * M_geom se računa iz ovih pozicija u LOC3D_Init() (runtime), pa promjena
+ * koordinata automatski propagira — ništa drugo ne treba ručno mijenjati. */
+#define MIC1_X   0.0000f
+#define MIC1_Y   0.0000f
+#define MIC1_Z   0.0000f
 
-#define MIC1_X  0.0f
-#define MIC1_Y  0.0f
-#define MIC1_Z  0.0f
+#define MIC2_X   0.0867f   /*  8.67 cm */
+#define MIC2_Y   0.0500f   /*  5.00 cm */
+#define MIC2_Z   0.0000f
 
-#define MIC2_X  MIC_TETRA_EDGE
-#define MIC2_Y  0.0f
-#define MIC2_Z  0.0f
+#define MIC3_X   0.0867f   /*  8.67 cm */
+#define MIC3_Y  (-0.0500f) /* −5.00 cm */
+#define MIC3_Z   0.0000f
 
-#define MIC3_X  (MIC_TETRA_EDGE * 0.5f)
-#define MIC3_Y  (MIC_TETRA_EDGE * 0.86602540378f)
-#define MIC3_Z  0.0f
+#define MIC4_X   0.0500f   /*  5.00 cm */
+#define MIC4_Y   0.0000f
+#define MIC4_Z   0.0800f   /*  8.00 cm */
 
-#define MIC4_X  (MIC_TETRA_EDGE * 0.5f)
-#define MIC4_Y  (MIC_TETRA_EDGE * 0.28867513459f)
-#define MIC4_Z  (MIC_TETRA_EDGE * 0.81649658092f)
-
-/* ── TDOA ograničenje ─────────────────────────────────────────────────────── */
-/* Max akustički TDOA za brid 10 cm: 0.10/343 * 64000 = 18.66 uzoraka → 20  */
+/* ── TDOA ograničenje ─────────────────────────────────────────────────────────
+ * Korelira se M1 vs M2/M3/M4; najveći baseline od M1 ≈ 10 cm (M1-M2, M1-M3).
+ * 0.10/343 · 64000 = 18.66 uzoraka → 20. Povećaj ako proširiš niz. */
 #define TDOA_MAX_SAMPLES      20
-
-/* ── Slanje podataka ──────────────────────────────────────────────────────── */
-#define SEND_AUDIO_FRAMES     0
 
 #endif /* AUDIO_COMMON_H */

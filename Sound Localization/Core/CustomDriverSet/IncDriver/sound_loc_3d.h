@@ -2,22 +2,27 @@
 #define SOUND_LOC_3D_H
 
 /*
- * sound_loc_3d.h — 3D lokalizacija zvuka sa 4 mikrofona (tetraedarski raspored)
+ * sound_loc_3d.h — 3D lokalizacija zvuka sa 4 mikrofona
  *
  * Algoritam:
- *   1. GCC (normalizirana križna korelacija) za 3 para: M1-M2, M1-M3, M1-M4
- *   2. Korekcija ADC sekvencijalnog offseta (870.6 ns po kanalu)
- *   3. Analitičko rješavanje donjeg trokutnog sustava 3×3 za smjer u = (ux,uy,uz)
- *   4. Azimut = atan2(uy, ux), Elevacija = atan2(uz, sqrt(ux²+uy²))
+ *   1. GCC-PHAT za 3 para: M1-M2, M1-M3, M1-M4
+ *   2. Korekcija ADC sekvencijalnog offseta (352.9 ns po kanalu)
+ *   3. u = M_geom · tau  (M_geom = c·inv(D), računato u LOC3D_Init iz pozicija)
+ *   4. Smjer PREMA izvoru s = −u; Azimut = atan2(sy, sx), Elevacija = asin(sz)
  *
- * Koordinatni sustav: M1 u ishodištu, os X prema M2, Y gore iz ravnine M1-M2-M3.
- *   θ = 0° → zvuk dolazi od smjera M2 (pozitivna os X)
- *   θ = 90° → zvuk dolazi od smjera M3 (pozitivna os Y)
- *   φ > 0° → zvuk dolazi odozgo (pozitivna os Z)
+ * Koordinatni sustav (pozicije u audio_common.h), azimut = atan2(sy,sx).
+ * Izlaz az_tenth je u rasponu [-1800, +1800] tenths (tj. [-180°, +180°]):
+ *   +X →    0°  naprijed (bisektrisa M2/M3)   +Y →  +90°  lijevo (M2)
+ *   −X → ±180°  nazad (M1)                     −Y →  −90°  desno (M3)
+ *   +Z → elevacija +90° (gore, M4). M1 je u ishodištu (referentni mik).
  */
 
 #include "audio_common.h"
 #include <stdint.h>
+
+/* Izračunaj M_geom iz pozicija mikrofona (audio_common.h). Pozvati JEDNOM na
+ * startu prije prvog LOC3D_Process (npr. uz GCC_Init). */
+void LOC3D_Init(void);
 
 typedef struct {
     int16_t  az_tenth;   /* azimut u 0.1°,  raspon -1800..+1800 */
@@ -28,17 +33,13 @@ typedef struct {
 
 
 /*
- * LOC3D_Process — obradi prozor od SAMPLES_PER_CHANNEL frejmova počevši od
- * `frame_offset` unutar `buf` i vrati 3D smjer.
+ * LOC3D_Process — interno pronađe energetski vrh (find_peak_offset) unutar
+ * sliding buffera, centrira SAMPLES_PER_CHANNEL prozor na njega i vrati 3D smjer.
  *
- * Sliding window: pozivatelj može pozvati funkciju više puta na različitim
- * offsetima unutar istog buffera kako bi uhvatio transient (npr. pljesak) koji
- * leži na granici dva DMA half-buffera.
- *
- * @param buf           interleaved [s*NUM_CH + ch] uint16_t buffer (read-only)
- * @param frame_offset  početni frejm prozora unutar buf
- * @param out           rezultat lokalizacije (validan samo ako je povrat 1)
- * @return              1 = valjan smjer izračunat, 0 = tišina / nekonzistentni TDOA
+ * @param buf   interleaved [s*NUM_CH + ch] uint16_t sliding buffer (read-only),
+ *              duljine 2*SAMPLES_PER_CHANNEL frejmova
+ * @param out   rezultat lokalizacije (validan samo ako je povrat 1)
+ * @return      1 = valjan smjer izračunat, 0 = tišina / loša korelacija / cooldown
  */
 uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out);
 

@@ -1,20 +1,24 @@
 #include "mock_adc.h"
+
+/* Cijeli modul se kompajlira samo uz USE_MOCK_ADC (audio_common.h). Inače je
+ * prazan — da ~68 KB mock tablica (s_mock_table + s_burst_source) ne troši BSS
+ * kad se koriste pravi mikrofoni. */
+#if USE_MOCK_ADC
+
 #include <math.h>
 #include <string.h>
 
 #ifndef PI
-#define PI 3.14159265358979323846f
+#define PI 3.14159f
 #endif
 
-/* Period između pljeskova izražen u DMA half-events (1 event = 8 ms @ 64 kHz).
+/* Period između pljeskova izražen u DMA half-events (1 event = 16 ms @ 64 kHz).
  * Mora biti > SILENCE_FRAMES_REQUIRED (12) inače HOLDOFF nikad ne pušta novi
- * pljesak. 24 evenata = 192 ms tišine između pljeskova. */
+ * pljesak. 24 evenata = 384 ms tišine između pljeskova. */
 #define MOCK_EVENTS_PER_BURST 24
 
-/* Burst parametri — širokopojasni Gaussov pucanj (kao pravi pljesak).
- * UPOZORENJE: uskopojasni signali (čist ton) razbijaju PHAT — daju mirror
- * peakove na vlasnitim lag-ovima. Bijeli šum kao carrier eliminira to. */
-#define BURST_CENTER_T        0.003f      /* sredina pljeska na ~3 ms unutar 8 ms half-buffera */
+/* peakove na vlasnitim lag-ovima. Bijeli šum kao carrier eliminira to. */
+#define BURST_CENTER_T        0.003f      /* sredina pljeska na ~3 ms unutar 16 ms half-buffera */
 #define BURST_SIGMA           0.0008f     /* 0.8 ms — kratki transient */
 #define BURST_AMPLITUDE       1500.0f     /* LSB peak */
 #define DC_OFFSET             2048.0f
@@ -166,3 +170,5 @@ void Mock_FillHalf(uint16_t *dst)
     s_event_count++;
     g_mock_event_count = s_event_count;
 }
+
+#endif /* USE_MOCK_ADC */

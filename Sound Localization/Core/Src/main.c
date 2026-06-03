@@ -39,11 +39,14 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
   GCC_Init();
-  Custom_ACQ_Start();
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_THREADS */
+  /* Kreiraj RTOS objekte (queueDmaEventHandle i dr.) PRIJE pokretanja ADC/DMA/TIM:
+   * DMA1_Channel1_IRQHandler šalje u queueDmaEventHandle, koji nastaje ovdje.
+   * Da ISR ne gađa NULL handle, Custom_ACQ_Start() ide tek nakon ovoga. */
   app_tasks_init();
+  Custom_ACQ_Start();
   /* USER CODE END RTOS_THREADS */
 
   osKernelStart();

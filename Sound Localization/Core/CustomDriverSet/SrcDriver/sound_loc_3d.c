@@ -13,7 +13,7 @@ volatile uint32_t dbg_frame_offset;
 
 /* Akumulacija TDOA mjerenja — koristi se za eksperimentalno određivanje
  * CH_DELAY_S. Spoji 4 ADC pina paralelno na isti izvor (npr. M1), pljesni
- * mnogo puta, pa pročitaj dbg_ch_delay_*_avg vrijednosti.
+ * mnogo puta, pa pročitaj dbg_ch_delay_from_tau12/13/14 vrijednosti.
  *
  *   Bez akustike (svi kanali = isti signal):
  *     tau12_meas = -1 · CH_DELAY
@@ -35,7 +35,7 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
 /* Detekcijski prag — privremeno snižen za CH_DELAY kalibraciju.
  * Spojeni su 4 ADC pina paralelno pa svi vide isti signal; bilo koji
  * pljesak iznad šumnog poda mora generirati detekciju. */
-#define MIN_RMS_THRESHOLD       25.0f
+#define MIN_RMS_THRESHOLD       20.0f
 #define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.3f)
 
 #define SILENCE_RMS_THRESH      5.0f
@@ -47,12 +47,13 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
 #define GCC_MIN_PEAK_QUALITY    2.0f
 
 /* Broj LOC3D_Process poziva koji se ignoriraju nakon svake detekcije.
- * 1 poziv ≈ 5.3 ms (16 ms half-buffer / 3 prozora) → 57 ≈ 300 ms cooldown. */
-#define DETECTION_COOLDOWN_FRAMES  57
+ * task_manager.c zove LOC3D_Process jednom po half-bufferu = 16 ms.
+ * 57 × 16 ms ≈ 912 ms cooldown. */
+#define DETECTION_COOLDOWN_FRAMES  19
 
 static uint16_t s_cooldown = 0;
 
-/* Kanalni nizovi — 4 × 512 × 4 B = 8 KB u BSS. */
+/* Kanalni nizovi — 4 × 1024 × 4 B = 16 KB u BSS. */
 static float s_ch0[SAMPLES_PER_CHANNEL];
 static float s_ch1[SAMPLES_PER_CHANNEL];
 static float s_ch2[SAMPLES_PER_CHANNEL];
@@ -62,26 +63,51 @@ static float s_ch3[SAMPLES_PER_CHANNEL];
 static float s_corr[SAMPLES_PER_CHANNEL];
 
 /*
- * Prekalkulirana matrica M = c × inv(D) za tetraedar s bridom 10 cm.
- *
- * D matrica (lower triangular) — pozicije mikrofona M2, M3, M4 (M1 u ishodištu):
- *   [ MIC2_X   0        0      ]   [ 0.10   0        0       ]
- *   [ MIC3_X   MIC3_Y   0      ] = [ 0.05   0.0866   0       ]
- *   [ MIC4_X   MIC4_Y   MIC4_Z ]   [ 0.05   0.0289   0.0816  ]
- *
- * M[0][0] = c / MIC2_X                                = 343 / 0.10    = 3430
- * M[1][0] = -c · MIC3_X / (MIC2_X · MIC3_Y)           = -1980.31
- * M[1][1] = c / MIC3_Y                                = 343 / 0.0866  = 3960.62
- * M[2][0] = -c · (MIC4_X · MIC3_Y − MIC4_Y · MIC3_X)
- *           / (MIC2_X · MIC3_Y · MIC4_Z)              = -1400.29
- * M[2][1] = -c · MIC4_Y / (MIC3_Y · MIC4_Z)           = -1401.84
- * M[2][2] = c / MIC4_Z                                = 343 / 0.0816  = 4200.87
- */
-static const float M_geom[3][3] = {
-    {  3430.0000f,     0.0000f,     0.0000f },
-    { -1980.3114f,  3960.6228f,     0.0000f },
-    { -1400.2916f, -1400.2916f,  4200.8749f }
-};
+ * M_geom = c · inv(D); retci D su baseline vektori (Mj − M1):
+ *   D = [ M2−M1 ; M3−M1 ; M4−M1 ]
+ * Veza (tau = T_j − T_1): za smjer PREMA izvoru s vrijedi  D · s = −c · tau,
+ *   pa je s = −c·inv(D)·tau = −M_geom·tau. Kod računa u = M_geom·tau (= smjer
+ *   propagacije = −s) i uzima s = −u (korak 6).
+ * Računa se u LOC3D_Init() iz MIC*_{X,Y,Z} (audio_common.h) — promjena
+ * geometrije se automatski propagira, bez ručnog preračunavanja matrice. */
+static float M_geom[3][3];
+
+/* Analitička inverzija 3×3 (adjugate / determinanta). */
+static void invert3x3(const float m[3][3], float inv[3][3])
+{
+    float det =
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    float idet = (fabsf(det) > 1e-12f) ? (1.0f / det) : 0.0f;
+
+    inv[0][0] =  (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * idet;
+    inv[0][1] = -(m[0][1] * m[2][2] - m[0][2] * m[2][1]) * idet;
+    inv[0][2] =  (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * idet;
+    inv[1][0] = -(m[1][0] * m[2][2] - m[1][2] * m[2][0]) * idet;
+    inv[1][1] =  (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * idet;
+    inv[1][2] = -(m[0][0] * m[1][2] - m[0][2] * m[1][0]) * idet;
+    inv[2][0] =  (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * idet;
+    inv[2][1] = -(m[0][0] * m[2][1] - m[0][1] * m[2][0]) * idet;
+    inv[2][2] =  (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * idet;
+}
+
+void LOC3D_Init(void)
+{
+    const float D[3][3] = {
+        { MIC2_X - MIC1_X, MIC2_Y - MIC1_Y, MIC2_Z - MIC1_Z },
+        { MIC3_X - MIC1_X, MIC3_Y - MIC1_Y, MIC3_Z - MIC1_Z },
+        { MIC4_X - MIC1_X, MIC4_Y - MIC1_Y, MIC4_Z - MIC1_Z }
+    };
+    float Dinv[3][3];
+    invert3x3(D, Dinv);
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            M_geom[i][j] = SPEED_OF_SOUND * Dinv[i][j];
+        }
+    }
+}
 
 /* Debug brojač — broji koliko je puta LOC3D_Process pozvan. Ako ostane 0,
  * pipeline ne dolazi ovdje. */
@@ -182,6 +208,12 @@ uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out)
     GCC_PHAT(s_ch0, s_ch3, s_corr);
     float tau14_meas = GCC_FindTDOA(s_corr, &qual14);
 
+    /* Debug: kvaliteta sva tri para — postavljeno PRIJE gatea da se u debuggeru
+     * vidi i kad neki par padne (inače ne znaš koji mikrofon ruši detekciju). */
+    dbg_qual12 = qual12;
+    dbg_qual13 = qual13;
+    dbg_qual14 = qual14;
+
     /* Quality gate — odbaci frame ako je ijedan par korelacija ravna (šum). */
     if (qual12 < GCC_MIN_PEAK_QUALITY ||
         qual13 < GCC_MIN_PEAK_QUALITY ||
@@ -194,9 +226,6 @@ uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out)
     dbg_tau12_meas = tau12_meas;
     dbg_tau13_meas = tau13_meas;
     dbg_tau14_meas = tau14_meas;
-    dbg_qual12 = qual12;
-    dbg_qual13 = qual13;
-    dbg_qual14 = qual14;
     dbg_rms[0] = rms0; dbg_rms[1] = rms1; dbg_rms[2] = rms2; dbg_rms[3] = rms3;
     /* dbg_frame_offset je već postavljen gore (find_peak_offset rezultat) */
 
@@ -251,10 +280,9 @@ uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out)
     out->az_tenth = (int16_t)(az_rad * (1800.0f / PI));
     out->el_tenth = (int16_t)(el_rad * (1800.0f / PI));
 
-    /* 8. Jakost — logaritamska mapa (dB-like) bolja je za vizualizaciju jer
-     * pljesak može varirati od RMS=30 do RMS=500. Linearna formula gušila bi
-     * niske vrijednosti. Mapa: RMS=20 → ~20, RMS=100 → ~60, RMS=500 → 100. */
-    float str_f = 20.0f * log10f(rms_max + 1.0f);   /* dB */
+    /* 8. Jakost — log mapa (dB-like) za vizualizaciju (pljesak RMS≈30..500).
+     * 20·log10(rms+1): RMS=20→~26, RMS=100→~40, RMS=500→~54 (ne doseže 100). */
+    float str_f = 20.0f * log10f(rms_max + 1.0f);
     if (str_f < 1.0f)    str_f = 1.0f;
     if (str_f > 100.0f)  str_f = 100.0f;
     out->strength = (uint8_t)str_f;

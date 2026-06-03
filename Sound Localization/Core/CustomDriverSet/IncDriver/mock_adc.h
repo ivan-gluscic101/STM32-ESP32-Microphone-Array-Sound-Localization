@@ -7,9 +7,9 @@
  * Generira interleaved [M1,M2,M3,M4,...] buffer koji točno reflektira:
  *   - 12-bit ADC raspon (0-4095), DC offset 2048
  *   - SAMPLE_RATE_HZ = 64 kHz (perioda 15.625 µs)
- *   - CH_DELAY_S = 870.6 ns sekvencijalni offset između kanala
+ *   - CH_DELAY_S = 352.9 ns sekvencijalni offset između kanala
  *   - Akustika: TDOA = -dir · pozicija_mikrofona / c (343 m/s)
- *   - Gaussov burst (~0.8 ms) modulran 1.5 kHz sinusom — simulira pljesak
+ *   - Gaussov burst (~0.8 ms) modulran bijelim šumom — simulira pljesak
  *
  * Tablica MOCK_NUM_DIRS pljeskova precomputed u Mock_Init() (BSS, ~32 KB).
  * U runtime Mock_FillHalf() radi samo memcpy — bez float matematike u
@@ -31,7 +31,7 @@
 /* Pretkalkulira sve pljeskove. Mora se pozvati JEDNOM prije prvog Mock_FillHalf. */
 void Mock_Init(void);
 
-/* Puni jedan half-buffer (HALF_BUFFER = 2048 uint16_t) sintetičkim podacima.
+/* Puni jedan half-buffer (HALF_BUFFER = 4096 uint16_t) sintetičkim podacima.
  * Interno održava brojač eventa pa svaki sljedeći poziv vraća sljedeći frame. */
 void Mock_FillHalf(uint16_t *dst);
 

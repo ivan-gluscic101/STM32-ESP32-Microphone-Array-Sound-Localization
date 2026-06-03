@@ -7,16 +7,18 @@
 #include "audio_common.h"
 #include <string.h>
 
-/* 1 = ACQ_Task koristi sintetičke pljeskove iz mock_adc (bez mikrofona)
- * 0 = pravi ADC podaci */
-#define USE_MOCK_ADC     0
+/* USE_MOCK_ADC je definiran u audio_common.h (dijeli ga mock_adc.c radi
+ * uvjetnog kompajliranja mock tablica). */
 #define ACQ_NUM_BUFFERS  3
 
 osMessageQId  queueDmaEventHandle;
 QueueHandle_t queueSnapshotHandle;
 QueueHandle_t queueResultHandle;
 
-/* Trostruki snapshot buffer: ACQ_Task rotira 0→1→2→0, FFT_Task čita zadnji.
+/* Trostruki snapshot buffer + FIFO queue indeksa (dubina ACQ_NUM_BUFFERS-1):
+ * ACQ_Task rotira 0→1→2→0 i šalje indeks, FFT_Task ih troši redom (FIFO).
+ * Queue dubine N-1 + 1 koji se trenutno čita = max N "zauzetih" buffera, pa
+ * ACQ nikad ne prepisuje buffer koji je u queue-u ili se čita (vidi guard dolje).
  * 3 × HALF_BUFFER × 2 B = 3 × 8 KB = 24 KB u BSS-u. */
 static uint16_t acq_snapshot[ACQ_NUM_BUFFERS][HALF_BUFFER];
 
@@ -35,6 +37,12 @@ static void StartACQTask(void const *argument)
         osEvent evt = osMessageGet(queueDmaEventHandle, osWaitForever);
         if (evt.status != osEventMessage) { continue; }
 
+        /* Ako FFT_Task zaostaje i queue je pun, preskoči ovaj event umjesto da
+         * prepišemo acq_snapshot[write_idx] koji je možda još u queue-u ili ga
+         * FFT_Task upravo čita — time bismo izazvali torn read. Samo proizvođač
+         * šalje u ovaj queue, pa se prostor između provjere i slanja ne smanjuje. */
+        if (uxQueueSpacesAvailable(queueSnapshotHandle) == 0u) { continue; }
+
 #if USE_MOCK_ADC
         (void)evt;
         Mock_FillHalf(acq_snapshot[write_idx]);
@@ -47,7 +55,7 @@ static void StartACQTask(void const *argument)
         memcpy(acq_snapshot[write_idx], src, HALF_BUFFER * sizeof(uint16_t));
 #endif
 
-        xQueueOverwrite(queueSnapshotHandle, &write_idx);
+        xQueueSend(queueSnapshotHandle, &write_idx, 0u);
         write_idx = (uint8_t)((write_idx + 1u) % ACQ_NUM_BUFFERS);
     }
 }
@@ -89,10 +97,12 @@ static void StartUARTTask(void const *argument)
 
 void app_tasks_init(void)
 {
+    LOC3D_Init();   /* izračunaj M_geom iz pozicija mikrofona prije pokretanja taskova */
+
     osMessageQDef(queueDmaEvent, 8, uint32_t);
     queueDmaEventHandle = osMessageCreate(osMessageQ(queueDmaEvent), NULL);
 
-    queueSnapshotHandle = xQueueCreate(1, sizeof(uint8_t));
+    queueSnapshotHandle = xQueueCreate(ACQ_NUM_BUFFERS - 1, sizeof(uint8_t));
     queueResultHandle   = xQueueCreate(4, sizeof(loc3d_result_t));
 
     osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime, 0, 256);

@@ -17,4 +17,21 @@ void UART_SendAnglePacket(int16_t phi_tenth_deg, uint8_t strength);
  */
 void UART_SendAngle3DPacket(int16_t az_tenth, int16_t el_tenth, uint8_t strength);
 
+/*
+ * UART_SendRawCapture — pošalji sirove (deinterleaveane, poravnate) uzorke sva
+ * 4 kanala na ESP32 kao binarni okvir (tip 0x04), nakon detekcije. Blocking.
+ *
+ * Okvir:
+ *   [0xAA][0xBB][0x04][NCH][N_H][N_L]  zaglavlje
+ *     NCH = broj kanala (NUM_CH),  N = uzoraka po kanalu (SAMPLES_PER_CHANNEL),
+ *     big-endian
+ *   zatim NCH × N uzoraka, big-endian uint16, kanal-major redoslijed:
+ *     ch0[0..N-1], ch1[0..N-1], ch2[0..N-1], ch3[0..N-1]
+ *   [0xCC][0xDD]  završetak
+ *
+ * Svaki niz mora imati SAMPLES_PER_CHANNEL uint16 uzoraka.
+ */
+void UART_SendRawCapture(const uint16_t *ch0, const uint16_t *ch1,
+                         const uint16_t *ch2, const uint16_t *ch3);
+
 #endif /* UART_DRIVER_H */

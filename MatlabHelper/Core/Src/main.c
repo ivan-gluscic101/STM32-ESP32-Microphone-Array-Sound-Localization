@@ -91,8 +91,8 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   /* USER CODE BEGIN 2 */
-  AdcCapture_Init();    /* GPIO analog, TIM3 @ ~32 kHz, ADC1 scan + continuous DMA */
-  UartStream_Init();    /* USART3 high-speed TX stream + DMA1_Ch2 */
+  AdcCapture_Init();    /* GPIO analog, TIM3 @ ~32 kHz, ADC1 scan + kontinuirani DMA */
+  UartStream_Init();    /* USART3 brzi TX stream + DMA1_Ch2 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -105,14 +105,18 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* Non-blocking continuous stream:
-     * ADC runs all the time in circular DMA.  When UART DMA is free, take the
-     * next completed ADC half-buffer, prepend the sync header and start TX.
-     * Do NOT stop/restart ADC after every frame; that creates gaps.
+    /* TX okidan događajem:
+     * ADC stalno radi u circular DMA-u, a ISR detektira pljeskove.
+     * AdcCapture_Task() sastavi prozor oko detektiranog događaja; kad je
+     * spreman i UART DMA slobodan, pošalji taj jedan mali paket.
+     * Linija miruje između pljeskova, pa host nikad ne preljeva.
      */
-    if (!UartStream_Busy() && AdcCapture_FrameReady())
+    AdcCapture_Task();
+
+    if (AdcCapture_EventReady() && !UartStream_Busy())
     {
-      UartStream_Send((const uint8_t *)AdcCapture_Buffer(), ADC_TX_BYTES);
+      UartStream_Send((const uint8_t *)AdcCapture_EventPacket(), ADC_TX_BYTES);
+      AdcCapture_EventConsumed();
     }
   }
   /* USER CODE END 3 */
@@ -174,7 +178,7 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA1_Channel1_IRQn: ADC1 capture */
+  /* DMA1_Channel1_IRQn: ADC1 akvizicija */
   NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),0, 0));
   NVIC_EnableIRQ(DMA1_Channel1_IRQn);
   /* DMA1_Channel2_IRQn: USART3 TX stream */

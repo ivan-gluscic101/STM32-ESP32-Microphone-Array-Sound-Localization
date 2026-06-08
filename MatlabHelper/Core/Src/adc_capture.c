@@ -1,7 +1,9 @@
 /**
   ******************************************************************************
   * @file    adc_capture.c
-  * @brief   Continuous 4-channel ADC acquisition using circular DMA.
+  * @brief   Slobodno-tekući 4-kanalni ADC (circular DMA) s detekcijom pljeska
+  *          na čipu. UART-u se predaje samo kratak prozor oko svakog
+  *          detektiranog događaja, umjesto slanja svega.
   ******************************************************************************
   */
 #include "adc_capture.h"
@@ -9,25 +11,46 @@
 #include "main.h"
 #include <string.h>
 
-/* ADC DMA buffer: two complete payload frames, no sync words here.
- * Half-transfer interrupt means dma_frame[0] is ready.
- * Transfer-complete interrupt means dma_frame[1] is ready.
- */
-static uint16_t          dma_frame[2U * ADC_FRAME_LEN];
+/* ADC DMA double buffer: dva bloka. HT prekid => blok 0 gotov,
+ * TC prekid => blok 1 gotov. Jedan prekid po ADC_BLOCK_SAMPLES. */
+static uint16_t dma_buf[2U * ADC_BLOCK_LEN];
 
-/* Two transmit buffers with sync header + copied payload.  The copy protects
- * the UART DMA from the ADC DMA overwriting the next circular half-buffer.
- */
-static uint16_t          tx_frame[2U][ADC_TX_LEN];
-static uint8_t           tx_index = 0U;
-static bool              tx_prepared = false;
+/* Pred-okidni povijesni prsten sirovih interleaveanih uzoraka (HIST_BLOCKS blokova). */
+static uint16_t hist[HIST_BLOCKS * ADC_BLOCK_LEN];
 
-static volatile uint32_t ready_mask = 0U;     /* bit0: first half, bit1: second half */
-static volatile uint32_t dropped_frames = 0U; /* increments when MATLAB/UART cannot keep up */
-static bool              started = false;
+/* Sastavljeni paket događaja: sync zaglavlje + EVENT_WIN_BLOCKS kopiranih blokova. */
+static uint16_t tx_packet[ADC_TX_LEN];
+
+/* --- stanje detekcije (mijenja se u ISR-u, čita u glavnoj petlji) --- */
+typedef enum
+{
+  ST_FILL = 0,     /* uči DC + šumni pod, prsten još nije napunjen     */
+  ST_IDLE,         /* naoružan, čeka okidanje                          */
+  ST_CAPTURE,      /* okidanje viđeno, čeka dolazak POST blokova       */
+  ST_REFRACTORY    /* događaj uhvaćen, neko vrijeme ignoriraj re-okide */
+} evstate_t;
+
+static volatile evstate_t state       = ST_FILL;
+static int32_t            dc[ADC_NUM_CHANNELS]; /* DC pratitelj po kanalu */
+static uint64_t           nf_energy   = 0U;     /* prilagodljiva energija šumnog poda */
+static uint32_t           blocks_seen = 0U;
+static uint32_t           hist_wr     = 0U;     /* sljedeći blok prstena za upis */
+
+static volatile uint32_t  trig_block  = 0U;     /* indeks bloka okidanja u prstenu */
+static volatile uint32_t  post_left   = 0U;
+static volatile uint32_t  refr_left   = 0U;
+
+/* Predaja ISR -> glavna petlja. */
+static volatile bool      assemble_req = false; /* ISR: prozor spreman za kopiranje */
+static volatile uint32_t  win_start_block = 0U; /* najstariji blok prozora u prstenu */
+static volatile bool      event_ready  = false; /* main: tx_packet popunjen, pošalji ga */
+static volatile uint32_t  event_count  = 0U;
+static volatile uint32_t  dropped_events = 0U;
+
+static bool started = false;
 
 /* --------------------------------------------------------------------------
- * Low-level peripheral init (GPIO analog inputs, TIM3 time base, ADC1 + DMA)
+ * Nisko-razinski init periferija (GPIO analog, TIM3 vrem. baza, ADC1+DMA)
  * -------------------------------------------------------------------------- */
 static void adc_gpio_init(void)
 {
@@ -36,7 +59,7 @@ static void adc_gpio_init(void)
   LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOC);
   LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
 
-  /** ADC1 GPIO Configuration
+  /** ADC1 GPIO konfiguracija
    *  PB14 ------> ADC1_IN5   rank1, MATLAB MIC1
    *  PC0  ------> ADC1_IN6   rank2, MATLAB MIC2
    *  PC1  ------> ADC1_IN7   rank3, MATLAB MIC3
@@ -75,7 +98,7 @@ static void tim3_init(void)
 
 static void adc_dma_init(void)
 {
-  /* DMA1_Channel1: ADC1 -> memory, half-words, circular continuous mode. */
+  /* DMA1_Channel1: ADC1 -> memorija, half-words, circular continuous mode. */
   LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_1, LL_DMAMUX_REQ_ADC1);
   LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_1, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
   LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PRIORITY_VERYHIGH);
@@ -126,20 +149,23 @@ static void adc1_init(void)
 
   LL_ADC_REG_SetTriggerEdge(ADC1, LL_ADC_REG_TRIG_EXT_RISING);
 
+  /* Sampling time 47.5 ADC clk ciklusa @ 42.5 MHz = 1.12 us po kanalu.
+   * 4 kanala x (47.5+12.5)/42.5 MHz = 5.65 us ukupni scan << 31.25 us TIM3 perioda.
+   * Nužno za elektret mikrofone s izlaznom impedancijom ~1-10 kOhm. */
   LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_5);
-  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SAMPLINGTIME_47CYCLES_5);
   LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SINGLE_ENDED);
 
   LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_6);
-  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_6, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_6, LL_ADC_SAMPLINGTIME_47CYCLES_5);
   LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_6, LL_ADC_SINGLE_ENDED);
 
   LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, LL_ADC_CHANNEL_7);
-  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_7, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_7, LL_ADC_SAMPLINGTIME_47CYCLES_5);
   LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_7, LL_ADC_SINGLE_ENDED);
 
   LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, LL_ADC_CHANNEL_8);
-  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_8, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_8, LL_ADC_SAMPLINGTIME_47CYCLES_5);
   LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_8, LL_ADC_SINGLE_ENDED);
 }
 
@@ -170,55 +196,148 @@ static void adc_enable_and_calibrate(void)
   }
 }
 
-static void init_tx_headers(void)
+/* --------------------------------------------------------------------------
+ * Pomoćne funkcije detekcije
+ * -------------------------------------------------------------------------- */
+static void detect_reset(void)
 {
-  for (uint32_t b = 0U; b < 2U; b++)
+  state        = ST_FILL;
+  nf_energy    = 0U;
+  blocks_seen  = 0U;
+  hist_wr      = 0U;
+  post_left    = 0U;
+  refr_left    = 0U;
+  assemble_req = false;
+  event_ready  = false;
+  event_count  = 0U;
+  dropped_events = 0U;
+  for (uint32_t ch = 0U; ch < ADC_NUM_CHANNELS; ch++)
   {
-    for (uint32_t i = 0U; i < FRAME_SYNC_LEN; i++)
+    dc[ch] = 2048;   /* sredina 12-bit skale: razuman početni DC za elektrete */
+  }
+}
+
+/* Kopiraj jedan gotov DMA block u povijesni prsten, ažuriraj DC follower po
+ * kanalu i vrati energiju bloka (suma kvadrata AC uzoraka). */
+static uint64_t ingest_block(const uint16_t *src, uint32_t *out_ring_idx)
+{
+  const uint32_t idx = hist_wr;
+  uint16_t      *dst = &hist[idx * ADC_BLOCK_LEN];
+  uint64_t       acc = 0U;
+
+  for (uint32_t s = 0U; s < ADC_BLOCK_SAMPLES; s++)
+  {
+    for (uint32_t ch = 0U; ch < ADC_NUM_CHANNELS; ch++)
     {
-      tx_frame[b][i] = FRAME_SYNC_U16;
+      int32_t x = (int32_t)(*src++);
+      int32_t d = x - dc[ch];
+      dc[ch] += (d >> EVENT_DC_SHIFT);          /* spori DC follower */
+      acc    += (uint64_t)((int64_t)d * (int64_t)d);
+      *dst++  = (uint16_t)x;                     /* spremi sirovi uzorak */
     }
   }
+
+  hist_wr = (idx + 1U) & HIST_MASK;
+  if (blocks_seen != 0xFFFFFFFFU)
+  {
+    blocks_seen++;
+  }
+  *out_ring_idx = idx;
+  return acc;
 }
 
-static void mark_half_ready(uint32_t half)
+static void nf_update(uint64_t e)
 {
-  const uint32_t bit = (1UL << half);
-
-  if ((ready_mask & bit) != 0U)
-  {
-    dropped_frames++;
-  }
-  ready_mask |= bit;
+  int64_t delta = (int64_t)e - (int64_t)nf_energy;
+  nf_energy = (uint64_t)((int64_t)nf_energy + (delta >> EVENT_NF_SHIFT));
 }
 
-static int32_t take_ready_half(void)
+/* Obradi jedan gotov block: napuni prsten, pokreni detection state machine. */
+static void process_block(const uint16_t *src)
 {
-  int32_t half = -1;
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
+  uint32_t this_block;
+  uint64_t e = ingest_block(src, &this_block);
 
-  if ((ready_mask & 0x01U) != 0U)
+  switch (state)
   {
-    ready_mask &= ~0x01U;
-    half = 0;
-  }
-  else if ((ready_mask & 0x02U) != 0U)
-  {
-    ready_mask &= ~0x02U;
-    half = 1;
-  }
+    case ST_FILL:
+      if (blocks_seen == 1U)
+      {
+        nf_energy = e;             /* seed */
+      }
+      else
+      {
+        nf_update(e);
+      }
+      /* Naoružan kad je šumni pod naučen i prsten drži dovoljno pre-roll
+       * uzoraka za izgradnju punog prozora. */
+      if (blocks_seen >= EVENT_NF_SEED_BLOCKS)
+      {
+        state = ST_IDLE;
+      }
+      break;
 
-  if (primask == 0U)
-  {
-    __enable_irq();
+    case ST_IDLE:
+    {
+      uint64_t thr = nf_energy * (uint64_t)EVENT_TRIG_FACTOR;
+      if ((e > thr) && (e > (uint64_t)EVENT_ABS_MIN_ENERGY))
+      {
+        trig_block = this_block;
+        post_left  = EVENT_POST_BLOCKS;
+        state      = ST_CAPTURE;
+      }
+      else
+      {
+        nf_update(e);              /* prilagođavaj samo dok je tiho */
+      }
+      break;
+    }
+
+    case ST_CAPTURE:
+      if (post_left > 0U)
+      {
+        post_left--;
+      }
+      if (post_left == 0U)
+      {
+        /* Najstariji block prozora = trigger - PRE (omotano). */
+        win_start_block = (trig_block + HIST_BLOCKS - EVENT_PRE_BLOCKS) & HIST_MASK;
+        if (event_ready || assemble_req)
+        {
+          dropped_events++;        /* prethodni događaj još nije poslan */
+        }
+        else
+        {
+          assemble_req = true;
+        }
+        refr_left = EVENT_REFRACTORY_BLOCKS;
+        state     = ST_REFRACTORY;
+      }
+      break;
+
+    case ST_REFRACTORY:
+      nf_update(e);
+      if (refr_left > 0U)
+      {
+        refr_left--;
+      }
+      if (refr_left == 0U)
+      {
+        state = ST_IDLE;
+      }
+      break;
+
+    default:
+      state = ST_FILL;
+      break;
   }
-  return half;
 }
 
+/* --------------------------------------------------------------------------
+ * Javni API
+ * -------------------------------------------------------------------------- */
 void AdcCapture_Init(void)
 {
-  init_tx_headers();
   adc_gpio_init();
   tim3_init();
   adc_dma_init();
@@ -233,16 +352,14 @@ void AdcCapture_Start(void)
     return;
   }
 
-  ready_mask = 0U;
-  dropped_frames = 0U;
-  tx_prepared = false;
+  detect_reset();
 
   LL_TIM_DisableCounter(TIM3);
   LL_TIM_SetCounter(TIM3, 0U);
 
   LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
-  LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_1, (uint32_t)dma_frame);
-  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, 2U * ADC_FRAME_LEN);
+  LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_1, (uint32_t)dma_buf);
+  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, 2U * ADC_BLOCK_LEN);
   LL_DMA_ClearFlag_HT1(DMA1);
   LL_DMA_ClearFlag_TC1(DMA1);
   LL_DMA_ClearFlag_TE1(DMA1);
@@ -256,42 +373,59 @@ void AdcCapture_Start(void)
   started = true;
 }
 
-bool AdcCapture_FrameReady(void)
+void AdcCapture_Task(void)
 {
-  if (tx_prepared)
+  if (!assemble_req)
   {
-    return true;
+    return;
   }
 
-  int32_t half = take_ready_half();
-  if (half < 0)
-  {
-    return false;
-  }
+  /* Snimi zahtjev, pa kopiraj prozor iz povijesnog prstena. Prsten se i dalje
+   * upisuje iza nas, ali ima zalihe (HIST_BLOCKS - EVENT_WIN_BLOCKS = 15
+   * blokova / ~30 ms) prije nego bi se najstariji block prozora prepisao. */
+  uint32_t b = win_start_block;
+  assemble_req = false;
 
-  tx_index ^= 1U;
   for (uint32_t i = 0U; i < FRAME_SYNC_LEN; i++)
   {
-    tx_frame[tx_index][i] = FRAME_SYNC_U16;
+    tx_packet[i] = FRAME_SYNC_U16;
   }
 
-  memcpy(&tx_frame[tx_index][FRAME_SYNC_LEN],
-         &dma_frame[((uint32_t)half) * ADC_FRAME_LEN],
-         ADC_FRAME_LEN * sizeof(uint16_t));
+  uint16_t *out = &tx_packet[FRAME_SYNC_LEN];
+  for (uint32_t blk = 0U; blk < EVENT_WIN_BLOCKS; blk++)
+  {
+    memcpy(out, &hist[b * ADC_BLOCK_LEN], ADC_BLOCK_LEN * sizeof(uint16_t));
+    out += ADC_BLOCK_LEN;
+    b = (b + 1U) & HIST_MASK;
+  }
 
-  tx_prepared = true;
-  return true;
+  event_count++;
+  event_ready = true;
 }
 
-const uint16_t *AdcCapture_Buffer(void)
+bool AdcCapture_EventReady(void)
 {
-  tx_prepared = false;
-  return tx_frame[tx_index];
+  return event_ready;
 }
 
-uint32_t AdcCapture_DroppedFrames(void)
+const uint16_t *AdcCapture_EventPacket(void)
 {
-  return dropped_frames;
+  return tx_packet;
+}
+
+void AdcCapture_EventConsumed(void)
+{
+  event_ready = false;
+}
+
+uint32_t AdcCapture_EventCount(void)
+{
+  return event_count;
+}
+
+uint32_t AdcCapture_DroppedEvents(void)
+{
+  return dropped_events;
 }
 
 void AdcCapture_DmaIrqHandler(void)
@@ -299,18 +433,20 @@ void AdcCapture_DmaIrqHandler(void)
   if (LL_DMA_IsActiveFlag_HT1(DMA1))
   {
     LL_DMA_ClearFlag_HT1(DMA1);
-    mark_half_ready(0U);
+    process_block(&dma_buf[0]);                 /* prvi block gotov */
   }
 
   if (LL_DMA_IsActiveFlag_TC1(DMA1))
   {
     LL_DMA_ClearFlag_TC1(DMA1);
-    mark_half_ready(1U);
+    process_block(&dma_buf[ADC_BLOCK_LEN]);     /* drugi block gotov */
   }
 
   if (LL_DMA_IsActiveFlag_TE1(DMA1))
   {
     LL_DMA_ClearFlag_TE1(DMA1);
-    dropped_frames++;
+    /* Transfer error: odbaci stanje detekcije, ponovno nauči šumni pod. */
+    state       = ST_FILL;
+    blocks_seen = 0U;
   }
 }

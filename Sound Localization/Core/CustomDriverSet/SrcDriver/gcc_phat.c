@@ -72,6 +72,9 @@ void GCC_SnapshotRaw(const uint16_t *buf, uint32_t frame_offset)
         dbg_raw_ch2[s] = p[s * NUM_CH + 2];
         dbg_raw_ch3[s] = p[s * NUM_CH + 3];
     }
+    uint8_t tmp;
+    tmp = 0;
+    (void) tmp;
 }
 
 float GCC_RMS(const float *ch)

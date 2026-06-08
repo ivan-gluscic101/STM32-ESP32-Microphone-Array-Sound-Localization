@@ -12,9 +12,12 @@
 static const char *TAG = "SOUND_LOC_PROC";
 
 /*
- * State machine za parsiranje angle paketa — podrška za 2D i 3D
- * Format 2D (Type 0x02): [0xAA][0xBB][0x02][PHI_H][PHI_L][STR][0xCC][0xDD]
- * Format 3D (Type 0x03): [0xAA][0xBB][0x03][AZ_H][AZ_L][EL_H][EL_L][STR][0xCC][0xDD]
+ * State machine za parsiranje angle paketa — podrška za 2D, 3D i RAW capture
+ * Format 2D  (Type 0x02): [0xAA][0xBB][0x02][PHI_H][PHI_L][STR][0xCC][0xDD]
+ * Format 3D  (Type 0x03): [0xAA][0xBB][0x03][AZ_H][AZ_L][EL_H][EL_L][STR][0xCC][0xDD]
+ * Format RAW (Type 0x04): [0xAA][0xBB][0x04][NCH][N_H][N_L]
+ *                          + NCH*N uzoraka (big-endian uint16, kanal-major)
+ *                          + [0xCC][0xDD]
  */
 typedef enum {
     S_SOF1 = 0,
@@ -25,9 +28,27 @@ typedef enum {
     S_EL_H,
     S_EL_L,
     S_STR,
+    S_RAW_NCH,
+    S_RAW_NH,
+    S_RAW_NL,
+    S_RAW_BODY,
     S_EOF1,
     S_EOF2,
 } pkt_state_t;
+
+/* Ispiši primljeni sirovi capture kao CSV na ESP32 konzolu (za copy u MATLAB).
+ * Layout u raw[]: kanal-major, big-endian uint16 → raw[(ch*n + s)*2]. */
+static void raw_capture_print(const uint8_t *raw, uint8_t nch, uint16_t n) {
+    printf("RAW START NCH=%u N=%u\n", (unsigned)nch, (unsigned)n);
+    for (uint16_t s = 0; s < n; s++) {
+        for (uint8_t ch = 0; ch < nch; ch++) {
+            size_t   idx = ((size_t)ch * n + s) * 2u;
+            uint16_t v   = ((uint16_t)raw[idx] << 8) | raw[idx + 1];
+            printf("%u%c", (unsigned)v, (ch + 1 < nch) ? ',' : '\n');
+        }
+    }
+    printf("RAW END\n");
+}
 
 #define LINE_BUF_SIZE 160
 
@@ -46,6 +67,13 @@ static void rx_task(void *arg) {
     uint8_t     el_h     = 0;
     uint8_t     el_l     = 0;
     uint8_t     str_val  = 0;
+
+    /* RAW capture (Type 0x04) */
+    static uint8_t raw_buf[RAW_MAX_BYTES];
+    uint8_t        raw_nch   = 0;
+    uint16_t       raw_n     = 0;
+    size_t         raw_total = 0;   /* nch * n * 2 */
+    size_t         raw_idx   = 0;
 
     static char line_buf[LINE_BUF_SIZE];
     size_t      line_idx = 0;
@@ -83,7 +111,13 @@ static void rx_task(void *arg) {
                     break;
                 case S_TYPE:
                     pkt_type = b;
-                    state = (b == 0x02 || b == 0x03) ? S_AZ_H : S_SOF1;
+                    if (b == 0x02 || b == 0x03) {
+                        state = S_AZ_H;
+                    } else if (b == ANGLE_PKT_TYPE_RAW) {
+                        state = S_RAW_NCH;
+                    } else {
+                        state = S_SOF1;
+                    }
                     break;
                 case S_AZ_H:
                     az_h = b;
@@ -105,17 +139,48 @@ static void rx_task(void *arg) {
                     str_val = b;
                     state = S_EOF1;
                     break;
+                case S_RAW_NCH:
+                    raw_nch = b;
+                    state = S_RAW_NH;
+                    break;
+                case S_RAW_NH:
+                    raw_n = (uint16_t)((uint16_t)b << 8);
+                    state = S_RAW_NL;
+                    break;
+                case S_RAW_NL:
+                    raw_n |= (uint16_t)b;
+                    raw_total = (size_t)raw_nch * raw_n * 2u;
+                    raw_idx   = 0;
+                    /* Zaštita: ako zaglavlje premaši buffer, odbaci paket. */
+                    if (raw_nch == 0 || raw_n == 0 || raw_total > RAW_MAX_BYTES) {
+                        ESP_LOGW(TAG, "RAW paket prevelik/nevaljan (NCH=%u N=%u), odbacujem",
+                                 (unsigned)raw_nch, (unsigned)raw_n);
+                        state = S_SOF1;
+                    } else {
+                        state = S_RAW_BODY;
+                    }
+                    break;
+                case S_RAW_BODY:
+                    raw_buf[raw_idx++] = b;
+                    if (raw_idx >= raw_total) {
+                        state = S_EOF1;
+                    }
+                    break;
                 case S_EOF1:
                     state = (b == ANGLE_PKT_EOF1) ? S_EOF2 : S_SOF1;
                     break;
                 case S_EOF2:
                     if (b == ANGLE_PKT_EOF2) {
-                        int16_t az_tenth = (int16_t)((az_h << 8) | az_l);
-                        int16_t el_tenth = (pkt_type == 0x03) ? (int16_t)((el_h << 8) | el_l) : 0;
-                        float azimuth = az_tenth / 10.0f;
-                        float elevation = el_tenth / 10.0f;
-                        ESP_LOGI(TAG, "Type %d | Az: %.1f° | El: %.1f° | Strength: %d", pkt_type, azimuth, elevation, str_val);
-                        web_server_send_data(azimuth, elevation, str_val);
+                        if (pkt_type == ANGLE_PKT_TYPE_RAW) {
+                            raw_capture_print(raw_buf, raw_nch, raw_n);
+                        } else {
+                            int16_t az_tenth = (int16_t)((az_h << 8) | az_l);
+                            int16_t el_tenth = (pkt_type == 0x03) ? (int16_t)((el_h << 8) | el_l) : 0;
+                            float azimuth = az_tenth / 10.0f;
+                            float elevation = el_tenth / 10.0f;
+                            ESP_LOGI(TAG, "Type %d | Az: %.1f° | El: %.1f° | Strength: %d", pkt_type, azimuth, elevation, str_val);
+                            web_server_send_data(azimuth, elevation, str_val);
+                        }
                     }
                     state = S_SOF1;
                     break;

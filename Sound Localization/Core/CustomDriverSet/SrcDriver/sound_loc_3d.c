@@ -32,23 +32,22 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
 #define PI 3.14159265358979323846f
 #endif
 
-/* Detekcijski prag — privremeno snižen za CH_DELAY kalibraciju.
- * Spojeni su 4 ADC pina paralelno pa svi vide isti signal; bilo koji
- * pljesak iznad šumnog poda mora generirati detekciju. */
-#define MIN_RMS_THRESHOLD       20.0f
-#define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.3f)
+/* Detekcijski prag — snižen za stvarne (slabije / neujednačene) mikrofone.
+ * Novi niz daje manju amplitudu nego prijašnji, pa je prag 20 gušio pljeskove.
+ * MIN_RMS_THRESHOLD = glasnoća najjačeg kanala potrebna da se uopće pokrene
+ * obrada; MIN_RMS_PER_CHANNEL je labaviji (0.2×) da JEDAN slabiji mikrofon ne
+ * obori cijelu detekciju. Diži natrag ako šum počne okidati lažne detekcije. */
+#define MIN_RMS_THRESHOLD       10.0f
+#define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.2f)
 
-#define SILENCE_RMS_THRESH      5.0f
-#define SILENCE_FRAMES_REQUIRED 12
-
-/* Minimalni omjer pika GCC-PHAT korelacije i mean|corr|.
- * Tijekom CH_DELAY kalibracije snižen na 1.5 — svi kanali nose isti signal
- * pa će korelacija imati ekstremno oštar pik blizu lag=0. */
-#define GCC_MIN_PEAK_QUALITY    2.0f
+/* Minimalni omjer pika GCC-PHAT korelacije i srednje |korelacije| (peak/mean).
+ * Trenutačno 0.0 → gate je ISKLJUČEN: propušta svaki prozor, uključujući šum.
+ * Vrati na ~1.3–1.5 nakon što potvrdiš detekciju, da odsiječeš čisti šum. */
+#define GCC_MIN_PEAK_QUALITY    0.0f
 
 /* Broj LOC3D_Process poziva koji se ignoriraju nakon svake detekcije.
  * task_manager.c zove LOC3D_Process jednom po half-bufferu = 16 ms.
- * 57 × 16 ms ≈ 912 ms cooldown. */
+ * 19 × 16 ms ≈ 304 ms cooldown. */
 #define DETECTION_COOLDOWN_FRAMES  19
 
 static uint16_t s_cooldown = 0;

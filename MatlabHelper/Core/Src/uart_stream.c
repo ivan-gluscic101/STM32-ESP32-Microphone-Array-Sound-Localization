@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    uart_stream.c
-  * @brief   USART3 TX stream using DMA.
+  * @brief   USART3 TX stream preko DMA-a.
   ******************************************************************************
   */
 #include "uart_stream.h"
@@ -16,7 +16,7 @@ static void uart_gpio_init(void)
 
   LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
 
-  /* USART3 GPIO Configuration
+  /* USART3 GPIO konfiguracija
      PB10 ------> USART3_TX
      PB11 ------> USART3_RX */
   GPIO_InitStruct.Mode      = LL_GPIO_MODE_ALTERNATE;

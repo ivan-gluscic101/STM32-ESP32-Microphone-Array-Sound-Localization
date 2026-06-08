@@ -3,7 +3,6 @@
 #include "uart_driver.h"
 #include "sound_loc_3d.h"
 #include "gcc_phat.h"
-#include "mock_adc.h"
 #include "audio_common.h"
 #include <string.h>
 
@@ -26,6 +25,13 @@ static uint16_t acq_snapshot[ACQ_NUM_BUFFERS][HALF_BUFFER];
  * Vlasništvo: isključivo FFT_Task — nema concurrency problema.
  * 2 × HALF_BUFFER × 2 B = 16 KB u BSS-u. */
 static uint16_t sliding_buf[2 * HALF_BUFFER];
+
+/* Capture sirovih uzoraka za ESP32 šalje se IZRAVNO iz dbg_raw_chX (gcc_phat.c)
+ * da ne trošimo dodatnih 8 KB RAM-a. capture_ready zamrzava obradu između
+ * detekcije i kraja UART slanja (8 KB @115200 ≈ 0.7 s): dok je postavljen,
+ * FFT_Task ne zove LOC3D_Process pa GCC_SnapshotRaw ne prepisuje dbg_raw_chX
+ * koji UART_Task upravo šalje. Producer: FFT_Task. Consumer: UART_Task. */
+static volatile uint8_t capture_ready = 0;
 
 /* ── Task implementacije ─────────────────────────────────────────────────── */
 
@@ -75,9 +81,16 @@ static void StartFFTTask(void const *argument)
                acq_snapshot[read_idx],
                HALF_BUFFER * sizeof(uint16_t));
 
-        /* LOC3D_Process interno traži energetski vrh i centrira prozor. */
-        if (LOC3D_Process(sliding_buf, &result)) {
-            xQueueSend(queueResultHandle, &result, 0);
+        /* Dok prethodni capture još nije poslan, ne pokreći obradu — inače bi
+         * GCC_SnapshotRaw prepisao dbg_raw_chX koji UART_Task upravo šalje.
+         * Sliding buffer se i dalje održava gore, pa ne gubimo kontinuitet. */
+        if (!capture_ready) {
+            /* LOC3D_Process interno traži energetski vrh i centrira prozor te
+             * napuni dbg_raw_chX (GCC_SnapshotRaw) pri detekciji. */
+            if (LOC3D_Process(sliding_buf, &result)) {
+                capture_ready = 1;   /* dbg_raw_chX sada drži ovaj prozor */
+                xQueueSend(queueResultHandle, &result, 0);
+            }
         }
     }
 }
@@ -89,6 +102,15 @@ static void StartUARTTask(void const *argument)
     for (;;) {
         if (xQueueReceive(queueResultHandle, &r, portMAX_DELAY) == pdTRUE) {
             UART_SendAngle3DPacket(r.az_tenth, r.el_tenth, r.strength);
+
+            /* Nakon kuta pošalji i sirove uzorke (blocking) ako su spremni.
+             * Šaljemo izravno iz dbg_raw_chX — FFT_Task ih ne dira dok je
+             * capture_ready postavljen. */
+            if (capture_ready) {
+                UART_SendRawCapture(dbg_raw_ch0, dbg_raw_ch1,
+                                    dbg_raw_ch2, dbg_raw_ch3);
+                capture_ready = 0;
+            }
         }
     }
 }

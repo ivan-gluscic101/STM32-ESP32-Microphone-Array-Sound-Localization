@@ -1,9 +1,16 @@
 #include "uart_driver.h"
+#include "audio_common.h"
 
 static inline void UART_SendByte(uint8_t byte)
 {
     while (!LL_USART_IsActiveFlag_TXE(UART4));
     LL_USART_TransmitData8(UART4, byte);
+}
+
+static inline void UART_SendU16BE(uint16_t v)
+{
+    UART_SendByte((uint8_t)(v >> 8));
+    UART_SendByte((uint8_t)(v & 0xFF));
 }
 
 void Custom_UART4_Init(void)
@@ -70,6 +77,33 @@ void UART_SendAngle3DPacket(int16_t az_tenth, int16_t el_tenth, uint8_t strength
     UART_SendByte((uint8_t)(el_tenth >> 8));
     UART_SendByte((uint8_t)(el_tenth & 0xFF));
     UART_SendByte(strength);
+    UART_SendByte(0xCC);
+    UART_SendByte(0xDD);
+    while (!LL_USART_IsActiveFlag_TC(UART4));
+}
+
+void UART_SendRawCapture(const uint16_t *ch0, const uint16_t *ch1,
+                         const uint16_t *ch2, const uint16_t *ch3)
+{
+    const uint16_t  n   = (uint16_t)SAMPLES_PER_CHANNEL;
+    const uint16_t *chs[NUM_CH] = { ch0, ch1, ch2, ch3 };
+
+    /* Zaglavlje: [0xAA][0xBB][0x04][NCH][N_H][N_L] */
+    UART_SendByte(0xAA);
+    UART_SendByte(0xBB);
+    UART_SendByte(0x04);
+    UART_SendByte((uint8_t)NUM_CH);
+    UART_SendU16BE(n);
+
+    /* Tijelo: kanal-major, svaki uzorak big-endian uint16 */
+    for (uint32_t ch = 0u; ch < (uint32_t)NUM_CH; ch++) {
+        const uint16_t *p = chs[ch];
+        for (uint16_t s = 0u; s < n; s++) {
+            UART_SendU16BE(p[s]);
+        }
+    }
+
+    /* Završetak */
     UART_SendByte(0xCC);
     UART_SendByte(0xDD);
     while (!LL_USART_IsActiveFlag_TC(UART4));

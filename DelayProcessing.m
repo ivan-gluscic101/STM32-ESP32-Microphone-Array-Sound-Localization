@@ -1,339 +1,254 @@
 % =========================================================================
-%  Kontinuirana TDOA lokalizacija izvora zvuka - STM32G474RE + MATLAB
-%  Tok: [0xFF 0xFF 0xFF 0xFF] + 4-kanalni uint16 interleaved ADC blok
+%  DelayProcessing.m  -  TDOA 3D lokalizacija izvora zvuka
+%  STM32G474RE + MatlabHelper (3 Mbaud, ~32 kHz)
+%
+%  EVENT-TRIGGERED nacin rada:
+%    STM32 sam detektira pljeskanje (energija po bloku) i salje SAMO prozor
+%    oko dogadaja (EVENT_PRE + trigger + EVENT_POST = 17 blokova = 1088
+%    uzoraka/kanalu ~ 34 ms). Izmedu pljeskanja je linija u mirovanju, pa
+%    host nikad ne preplavi buffer -> detekcija je pouzdana.
+%
+%  Svaki primljeni paket = jedno pljeskanje. Po paketu:
+%    1. Sprema mic1..mic4, tdoa_us, az_deg, el_deg u workspace
+%    2. GCC-PHAT TDOA -> 3D DOA (azimut/elevacija)
+%    3. Crta: 4 mic signala + 3 GCC-PHAT korelacije
+%    4. Ispisuje kut u Command Window
 % =========================================================================
-
 clear; clc; close all;
 
-%% -------------------------------------------------------------------------
-%  KONFIGURACIJA - MORA odgovarati app_config.h na STM32 strani
-% -------------------------------------------------------------------------
-COM_PORT       = "COM5";
-BAUD_RATE      = 3000000;          % FT232RL maksimum je 3 Mbaud
-NUM_CHANNELS   = 4;
-SAMPLES_PER_CH = 1024;
-NUM_FRAMES_BUF = 4;                % 4*1024 uzoraka/kanalu za obradu ~=64 ms
-FS             = 170e6 / 5312;     % stvarni TIM3 Fs za ARR=5311: 32003.012 Hz
+%% =========================================================================
+%  KONFIGURACIJA  -  mora odgovarati app_config.h na STM32 strani
+%% =========================================================================
+COM_PORT        = 'COM5';
+BAUD_RATE       = 3000000;
+NUM_CHANNELS    = 4;
 
-C_SOUND        = 343.0;            % m/s, prilagodi za temperaturu po potrebi
-HPF_CUTOFF_HZ  = 300;
-LPF_CUTOFF_HZ  = 10000;            % mora biti < FS/2; za 32 kHz je 10 kHz OK
+% --- mora se poklapati s app_config.h ---
+ADC_BLOCK_SAMPLES = 64;                        % ADC_BLOCK_SAMPLES
+EVENT_PRE_BLOCKS  = 4;                          % EVENT_PRE_BLOCKS
+EVENT_POST_BLOCKS = 12;                         % EVENT_POST_BLOCKS
+EVENT_WIN_BLOCKS  = EVENT_PRE_BLOCKS + 1 + EVENT_POST_BLOCKS;   % = 17
+SAMPLES_PER_CH    = EVENT_WIN_BLOCKS * ADC_BLOCK_SAMPLES;       % = 1088
+FS                = 170e6 / 5312;               % 32 003.01 Hz (TIM3 ARR=5311)
 
-% Redoslijed MORA odgovarati ADC rankovima:
-% MIC1 = PB14/ADC1_IN5, MIC2 = PC0/ADC1_IN6, MIC3 = PC1/ADC1_IN7, MIC4 = PC2/ADC1_IN8
-MIC_POS = [
-    0,      0,      0;             % MIC1
-    0.0867, 0.05,   0;             % MIC2
-    0.0867,-0.05,   0;             % MIC3
-    0.05,   0,      0.08           % MIC4
+% indeks (priblizan) trenutka okidanja unutar prozora
+TRIG_SAMPLE       = EVENT_PRE_BLOCKS * ADC_BLOCK_SAMPLES + 1;   % ~ uzorak 257
+
+C_SOUND         = 343.0;
+HPF_CUTOFF_HZ   = 300;
+LPF_CUTOFF_HZ   = 10000;
+
+MIC_POS = [                      % prilagodi stvarnoj geometriji [m]
+    0,       0,      0;          % MIC1  PB14/ADC1_IN5
+    0.0867,  0.05,   0;          % MIC2  PC0/ADC1_IN6
+    0.0867, -0.05,   0;          % MIC3  PC1/ADC1_IN7
+    0.05,    0,      0.08        % MIC4  PC2/ADC1_IN8
 ];
 
-% Kalibracijske korekcije po paru MIC1-MICi [us].
-% Ako svi kanali imaju jednaku elektroniku, ostavi 0. Za preciznost izmjeri
-% zvuk iz poznatog smjera i ovdje upiši sustavni offset.
-TDOA_OFFSET_US = [0 0 0];
-
-CLAP_THRESHOLD_DB = 14;             % prag iznad adaptivnog noise floora
-PRE_EVENT_MS      = 8;
-POST_EVENT_MS     = 22;
-REFRACTORY_SEC    = 0.18;           % ne prijavljuj isti impuls više puta
-PLOT_EVERY_N_FRAMES = 2;
-
-SYNC = uint8([255; 255; 255; 255]);
-PAYLOAD_BYTES = NUM_CHANNELS * SAMPLES_PER_CH * 2;
-PACKET_BYTES  = numel(SYNC) + PAYLOAD_BYTES;
-BLOCK_SAMPLES = SAMPLES_PER_CH * NUM_FRAMES_BUF;
-
-max_mic_distance = max_pair_distance(MIC_POS);
-MAX_TDOA_US = max_mic_distance / C_SOUND * 1e6;
-MAX_LAG     = ceil(MAX_TDOA_US * 1e-6 * FS * 1.25);
-
-fprintf("UART brzina: %.1f Mbaud  (FT232RL limit)\n", BAUD_RATE/1e6);
-fprintf("Ocekivani tok: %.1f kB/s payload, %.2f Mbit/s na UART 8N1\n", ...
-    NUM_CHANNELS*FS*2/1000, NUM_CHANNELS*FS*2*10/1e6);
-fprintf("Frame: %d B svakih %.2f ms\n", PACKET_BYTES, SAMPLES_PER_CH/FS*1e3);
-
-%% -------------------------------------------------------------------------
-%  SERIJSKI PORT I LIVE BUFFER
-% -------------------------------------------------------------------------
-s = serialport(COM_PORT, BAUD_RATE, "Timeout", 0.20);
-s.ByteOrder = "little-endian";
-flush(s);
-
-rxbuf = uint8([]);
-sigbuf = zeros(BLOCK_SAMPLES, NUM_CHANNELS);
-frames_rx = 0;
-packets_lost_sync = 0;
-last_event_tic = -Inf;
-last_result = struct("az", NaN, "el", NaN, "u", [NaN;NaN;NaN], ...
-                     "tdoa_us", [NaN NaN NaN], "quality", 0);
-
-[b_bp, a_bp] = butter(3, [HPF_CUTOFF_HZ LPF_CUTOFF_HZ]/(FS/2), "bandpass");
-
-fig = figure("Name", "Kontinuirana TDOA lokalizacija", "Color", "w", ...
-             "Position", [40 60 1180 760]);
-tiledlayout(fig, 3, 2, "TileSpacing", "compact", "Padding", "compact");
-axRaw = nexttile(1, [1 2]); grid(axRaw,"on"); hold(axRaw,"on");
-axE   = nexttile(3); grid(axE,"on"); hold(axE,"on");
-axT   = nexttile(4); grid(axT,"on"); hold(axT,"on");
-axD   = nexttile(5, [1 2]); grid(axD,"on"); hold(axD,"on"); axis(axD,"equal");
-view(axD, 35, 22);
-
-fprintf("\nCekam kontinuirani stream. Za prekid zatvori figure ili pritisni Ctrl+C.\n");
-
-%% -------------------------------------------------------------------------
-%  GLAVNA PETLJA
-% -------------------------------------------------------------------------
-while isvalid(fig)
-    n = s.NumBytesAvailable;
-    if n > 0
-        newBytes = read(s, n, "uint8");
-        rxbuf = [rxbuf; uint8(newBytes(:))]; %#ok<AGROW>
-    else
-        pause(0.002);
-    end
-
-    [frames, rxbuf, lost_sync_now] = parse_packets(rxbuf, SYNC, PAYLOAD_BYTES, ...
-                                                   NUM_CHANNELS, SAMPLES_PER_CH);
-    packets_lost_sync = packets_lost_sync + lost_sync_now;
-
-    for k = 1:numel(frames)
-        frame = frames{k};
-        frames_rx = frames_rx + 1;
-        sigbuf = [sigbuf(SAMPLES_PER_CH+1:end, :); frame]; %#ok<AGROW>
-
-        if frames_rx < NUM_FRAMES_BUF
-            continue;
-        end
-
-        [result, event_detected, proc] = process_tdoa_block(sigbuf, FS, C_SOUND, ...
-            MIC_POS, MAX_LAG, TDOA_OFFSET_US, b_bp, a_bp, CLAP_THRESHOLD_DB, ...
-            PRE_EVENT_MS, POST_EVENT_MS);
-
-        tnow = toc_or_zero();
-        if event_detected && (tnow - last_event_tic) > REFRACTORY_SEC
-            last_event_tic = tnow;
-            last_result = result;
-            fprintf("[%7.2fs] Azimut=%+7.2f deg | Elevacija=%+7.2f deg | TDOA=[%+7.2f %+7.2f %+7.2f] us | Q=%.2f\n", ...
-                tnow, result.az, result.el, result.tdoa_us(1), result.tdoa_us(2), ...
-                result.tdoa_us(3), result.quality);
-        end
-
-        if mod(frames_rx, PLOT_EVERY_N_FRAMES) == 0
-            update_plots(axRaw, axE, axT, axD, sigbuf, proc, last_result, frames_rx, ...
-                         packets_lost_sync, FS, MIC_POS, MAX_TDOA_US);
-            drawnow limitrate;
-        end
-    end
-end
-
-clear s;
+% Soft sanity-check: STM32 je vec okinuo, ali odbacujemo paket ako je
+% prakticki ravan (npr. lazni okid). Snizi/digni po potrebi.
+MIN_EVENT_DB    = 6;     % vrh ovojnice mora biti barem ovoliko iznad medijana
 
 %% =========================================================================
-%  LOKALNE FUNKCIJE
-% =========================================================================
-function [frames, rxbuf, lost_sync] = parse_packets(rxbuf, sync, payload_bytes, n_ch, n_samp)
-    frames = {};
-    lost_sync = 0;
-    packet_bytes = numel(sync) + payload_bytes;
+%  IZVEDENE VELICINE
+%% =========================================================================
+PAYLOAD_BYTES = NUM_CHANNELS * SAMPLES_PER_CH * 2;   % = 4*1088*2 = 8704 B
 
-    while numel(rxbuf) >= numel(sync)
-        idx = find_sync(rxbuf, sync);
-        if isempty(idx)
-            % Zadrzi zadnja 3 bajta za slučaj da sync počinje na granici čitanja.
-            keep = min(numel(rxbuf), numel(sync)-1);
-            lost_sync = lost_sync + max(0, numel(rxbuf) - keep);
-            rxbuf = rxbuf(end-keep+1:end);
-            return;
-        end
+max_dist    = max_pair_dist(MIC_POS);
+MAX_TDOA_US = max_dist / C_SOUND * 1e6;
+MAX_LAG     = ceil(MAX_TDOA_US * 1e-6 * FS * 1.5);
+LAG_US      = (-MAX_LAG:MAX_LAG) / FS * 1e6;
 
-        if idx > 1
-            lost_sync = lost_sync + idx - 1;
-            rxbuf = rxbuf(idx:end);
-        end
+[b_bp, a_bp] = butter(3, [HPF_CUTOFF_HZ LPF_CUTOFF_HZ]/(FS/2), 'bandpass');
+COLORS = lines(NUM_CHANNELS);
 
-        if numel(rxbuf) < packet_bytes
-            return;
-        end
+fprintf('Fs=%.0f Hz | Prozor=%d uzoraka (%.1f ms) | MaxTDOA=%.0f us | MaxLag=%d\n', ...
+        FS, SAMPLES_PER_CH, SAMPLES_PER_CH/FS*1e3, MAX_TDOA_US, MAX_LAG);
+fprintf('Paket: %.0f B  (~%.1f ms TX po pljesku)\n\n', ...
+        PAYLOAD_BYTES+4, (PAYLOAD_BYTES+4)*10/BAUD_RATE*1e3);
 
-        payload = rxbuf(numel(sync)+1 : packet_bytes);
-        rxbuf = rxbuf(packet_bytes+1:end);
+%% =========================================================================
+%  SERIJSKI PORT
+%% =========================================================================
+s = serialport(COM_PORT, BAUD_RATE, 'Timeout', 30.0);
+s.ByteOrder = 'little-endian';
+flush(s);
+fprintf('Port %s otvoren. Cekam pljeskanje...\n\n', COM_PORT);
 
-        u16 = typecast(uint8(payload), "uint16");
-        mat = reshape(double(u16), n_ch, n_samp).';
-        frames{end+1} = mat; %#ok<AGROW>
-    end
-end
+%% =========================================================================
+%  INTERNE VARIJABLE
+%% =========================================================================
+ev_count = 0;
+t0       = tic;
+fig_h    = [];
 
-function idx = find_sync(buf, sync)
-    idx = [];
-    if numel(buf) < numel(sync)
-        return;
-    end
-    hit = strfind(buf(:).', sync(:).');
-    if ~isempty(hit)
-        idx = hit(1);
-    end
-end
+%% =========================================================================
+%  GLAVNA PETLJA  -  svaki paket je jedan detektirani dogadaj
+%% =========================================================================
+cleanup = onCleanup(@() safe_clear(s));
+while true
 
-function [result, event_detected, proc] = process_tdoa_block(x_raw, fs, c, mic_pos, max_lag, tdoa_offset_us, b, a, thr_add_db, pre_ms, post_ms)
-    x = double(x_raw);
-    x = x - median(x, 1);
-    x_f = filtfilt(b, a, x);
+    % --- citaj jedan event paket (blocking: sync + PAYLOAD_BYTES) ---
+    payload = read_one_packet(s, PAYLOAD_BYTES);
+    tnow    = toc(t0);
 
-    energy = mean(x_f.^2, 2);
-    env_win = max(8, round(0.8e-3 * fs));
-    env = movmean(energy, env_win);
-    env_db = 10*log10(env + eps);
-    nf_db = prctile(env_db, 20);
-    thr_db = nf_db + thr_add_db;
-    [pk_db, peak_sample] = max(env_db);
-    event_detected = pk_db > thr_db;
+    % --- parsiraj: interleaved uint16 -> (SAMPLES_PER_CH x NUM_CHANNELS) ---
+    u16   = typecast(uint8(payload(:)), 'uint16');
+    x_raw = reshape(double(u16), NUM_CHANNELS, SAMPLES_PER_CH).';
 
-    win_start = max(1, peak_sample - round(pre_ms*1e-3*fs));
-    win_end   = min(size(x_f,1), peak_sample + round(post_ms*1e-3*fs));
-    if win_end - win_start + 1 < 128
-        win_start = max(1, peak_sample - 64);
-        win_end = min(size(x_f,1), peak_sample + 64);
-    end
-    xw = x_f(win_start:win_end, :);
+    % --- DC removal + bandpass ---
+    x   = x_raw - median(x_raw, 1);
+    x_f = filtfilt(b_bp, a_bp, x);
 
-    tdoa_samples = zeros(1,3);
-    tdoa_us = zeros(1,3);
-    peak_val = zeros(1,3);
-    for i = 2:4
-        [xc, lags] = gcc_phat_delay(xw(:,1), xw(:,i), max_lag);
-        [pk, ix] = max(xc);
-        lag = refine_peak(lags, xc, ix);
-        tdoa_samples(i-1) = lag;
-        tdoa_us(i-1) = lag / fs * 1e6 - tdoa_offset_us(i-1);
-        peak_val(i-1) = pk;
+    % --- energetska ovojnica (sanity check + lokacija vrha za prikaz) ---
+    env_win = max(8, round(0.8e-3 * FS));
+    env_db  = 10*log10(movmean(mean(x_f.^2, 2), env_win) + eps);
+    md_db   = median(env_db);
+    [pk_db, peak_samp] = max(env_db);
+
+    if (pk_db - md_db) < MIN_EVENT_DB
+        fprintf('[%+.1fs] paket primljen ali prakticki ravan (%.1f dB) - preskacem\n', ...
+                tnow, pk_db - md_db);
+        continue;
     end
 
-    A = mic_pos(1,:) - mic_pos(2:end,:);
-    tau_s = tdoa_us(:) * 1e-6;
-    u = A \ (c * tau_s);
+    ev_count = ev_count + 1;
 
-    % Ako šum da normu > 1, projekcija na jedinicnu kuglu daje najbliži DOA.
-    nu = norm(u);
-    if nu < 1e-9
-        u_unit = [NaN; NaN; NaN];
-        az = NaN; el = NaN;
+    % --- GCC-PHAT TDOA preko cijelog prozora ---
+    % G = FFT(MIC1)*conj(FFT(MIC_i)): pozitivan lag = MIC_i prima KASNIJE = dalje od izvora
+    tdoa_us_v = zeros(1,3);
+    xc_all    = zeros(2*MAX_LAG+1, 3);
+    for mi = 2:NUM_CHANNELS
+        [xc, ~]         = gcc_phat(x_f(:,1), x_f(:,mi), MAX_LAG);
+        [~, ix]         = max(xc);
+        tdoa_us_v(mi-1) = LAG_US(ix);
+        xc_all(:,mi-1)  = xc;
+    end
+
+    % --- 3D DOA:  A * d = c * tau ---
+    A  = MIC_POS(1,:) - MIC_POS(2:end,:);
+    u  = A \ (C_SOUND * tdoa_us_v(:) * 1e-6);
+    un = norm(u);
+    if un < 1e-9
+        u_hat = [0;0;1]; az_deg = NaN; el_deg = NaN;
     else
-        u_unit = u / max(1, nu);
-        u_unit = u_unit / norm(u_unit);
-        az = atan2d(u_unit(2), u_unit(1));
-        el = asind(max(-1, min(1, u_unit(3))));
+        u_hat  = u / un;
+        az_deg = atan2d(u_hat(2), u_hat(1));
+        el_deg = asind(max(-1, min(1, u_hat(3))));
     end
 
-    physically_ok = all(abs(tdoa_us) <= 1.10 * max_pair_distance(mic_pos)/c*1e6);
-    quality = mean(peak_val) * double(physically_ok) * double(event_detected);
+    % --- spremi u workspace ---
+    t_win_ms = (0:SAMPLES_PER_CH-1) / FS * 1e3;
+    for mi = 1:NUM_CHANNELS
+        assignin('base', sprintf('mic%d', mi),     x_f(:,mi));
+        assignin('base', sprintf('mic%d_raw', mi), x(:,mi));
+    end
+    assignin('base','tdoa_us',  tdoa_us_v);
+    assignin('base','az_deg',   az_deg);
+    assignin('base','el_deg',   el_deg);
+    assignin('base','u_hat',    u_hat);
+    assignin('base','t_win_ms', t_win_ms);
 
-    result = struct("az", az, "el", el, "u", u_unit, "tdoa_us", tdoa_us, ...
-                    "quality", quality, "tdoa_samples", tdoa_samples, ...
-                    "peak", peak_val);
-    proc = struct("x_f", x_f, "env_db", env_db, "nf_db", nf_db, "thr_db", thr_db, ...
-                  "peak_sample", peak_sample, "win_start", win_start, "win_end", win_end, ...
-                  "event", event_detected);
+    % --- ispis ---
+    fprintf('[#%d | %+.1fs]  Az=%+.1f deg  El=%+.1f deg  TDOA=[%+.1f %+.1f %+.1f] us  (pk %.0f@%.1fms)\n', ...
+            ev_count, tnow, az_deg, el_deg, tdoa_us_v(1), tdoa_us_v(2), tdoa_us_v(3), ...
+            pk_db - md_db, (peak_samp-TRIG_SAMPLE)/FS*1e3);
+
+    % --- crtaj ---
+    fig_h = draw_event(fig_h, x_f, t_win_ms, xc_all, LAG_US, tdoa_us_v, ...
+                       az_deg, el_deg, COLORS, MAX_TDOA_US, ev_count, tnow);
 end
 
-function [xc, lags] = gcc_phat_delay(ref, sig, max_lag)
-    % Pozitivan lag znaci: sig kasni za ref, tj. t_sig - t_ref > 0.
-    ref = ref(:) - mean(ref);
-    sig = sig(:) - mean(sig);
-    n = 2^nextpow2(numel(ref) + numel(sig));
-    REF = fft(ref, n);
-    SIG = fft(sig, n);
-    G = SIG .* conj(REF);
-    G = G ./ (abs(G) + 1e-12);
-    r = real(ifft(G));
-    r = [r(end-max_lag+1:end); r(1:max_lag+1)];
-    lags = (-max_lag:max_lag).';
-    xc = r(:);
+%% =========================================================================
+%  CITANJE JEDNOG PAKETA  -  pronadi sync, zatim citaj payload
+%  Izmedu pljeskanja read blokira (linija mirna) - nema opterecenja CPU-a.
+%% =========================================================================
+function payload = read_one_packet(s, payload_bytes)
+win = uint8(zeros(1, 4));
+while ~all(win == 255)
+    b   = read(s, 1, 'uint8');
+    win = [win(2:end), uint8(b)];
+end
+payload = read(s, payload_bytes, 'uint8');
 end
 
-function lag = refine_peak(lags, xc, ix)
-    lag = double(lags(ix));
-    if ix <= 1 || ix >= numel(xc)
-        return;
-    end
-    y1 = xc(ix-1); y2 = xc(ix); y3 = xc(ix+1);
-    den = y1 - 2*y2 + y3;
-    if abs(den) > 1e-12
-        frac = 0.5 * (y1 - y3) / den;
-        if abs(frac) <= 1
-            lag = lag + frac;
-        end
-    end
+%% =========================================================================
+%  CRTANJE NA EVENT
+%% =========================================================================
+function fig = draw_event(fig, xw, t_ms, xc_all, lag_us, tdoa_us_v, ...
+                          az_deg, el_deg, colors, max_tdoa_us, ev_no, tnow)
+if isempty(fig) || ~ishandle(fig)
+    fig = figure('Name','Sound Localization - Event', 'Color','w', ...
+                 'Position',[100 80 1100 620]);
+end
+clf(fig);
+
+tl = tiledlayout(fig, 2, 3, 'TileSpacing','compact', 'Padding','compact');
+title(tl, sprintf('Detekcija #%d  |  t=%.1f s  |  Az=%+.1f deg  El=%+.1f deg', ...
+      ev_no, tnow, az_deg, el_deg), 'FontSize',12, 'FontWeight','bold');
+
+% --- gornji red (cijela sirina): 4 mic signala ---
+ax_sig = nexttile(1, [1 3]);
+hold(ax_sig,'on'); grid(ax_sig,'on');
+for i = 1:size(xw,2)
+    plot(ax_sig, t_ms, xw(:,i), '-', 'Color',colors(i,:), 'LineWidth',1.3, ...
+         'DisplayName', sprintf('MIC%d',i));
+end
+legend(ax_sig,'Location','northeast','FontSize',8);
+xlabel(ax_sig,'Vrijeme [ms]');  ylabel(ax_sig,'ADC (BP filtrirano)');
+title(ax_sig, sprintf('Prozor oko pljeskanja  (%.0f ms)', t_ms(end)-t_ms(1)));
+xlim(ax_sig,[t_ms(1) t_ms(end)]);
+
+% --- donji red: 3 GCC-PHAT korelacije ---
+pair_names = {'MIC1 <-> MIC2','MIC1 <-> MIC3','MIC1 <-> MIC4'};
+for i = 1:3
+    ax = nexttile(3+i);
+    hold(ax,'on'); grid(ax,'on');
+    plot(ax, lag_us, xc_all(:,i), 'b-', 'LineWidth',1.4);
+    [pk,ix] = max(xc_all(:,i));
+    plot(ax, lag_us(ix), pk, 'rv', 'MarkerSize',9, 'MarkerFaceColor','r');
+    xline(ax, tdoa_us_v(i), 'r--', 'LineWidth',2);
+    xline(ax,  max_tdoa_us, 'k:', 'LineWidth',1);
+    xline(ax, -max_tdoa_us, 'k:', 'LineWidth',1);
+    xlabel(ax,'tau [us]');  ylabel(ax,'GCC-PHAT');
+    title(ax, sprintf('%s:  tau = %+.1f us', pair_names{i}, tdoa_us_v(i)));
+    xlim(ax,[lag_us(1) lag_us(end)]);
+    if isfinite(pk) && pk > 0, ylim(ax,[-pk*0.2, pk*1.3]); end
 end
 
-function update_plots(axRaw, axE, axT, axD, sigbuf, proc, result, frames_rx, lost_sync, fs, mic_pos, max_tdoa_us)
-    t_ms = (0:size(sigbuf,1)-1)/fs*1e3;
-
-    cla(axRaw);
-    plot(axRaw, t_ms, sigbuf - median(sigbuf,1));
-    title(axRaw, sprintf("Kontinuirani ADC tok | frame=%d | izgubljeni sync bajtovi=%d", frames_rx, lost_sync));
-    xlabel(axRaw, "Vrijeme [ms]"); ylabel(axRaw, "ADC - median");
-    legend(axRaw, "MIC1", "MIC2", "MIC3", "MIC4", "Location", "northeast");
-    grid(axRaw,"on");
-
-    cla(axE);
-    tt = (0:numel(proc.env_db)-1)/fs*1e3;
-    plot(axE, tt, proc.env_db, "LineWidth", 1.0); hold(axE,"on");
-    yline(axE, proc.nf_db, "--"); yline(axE, proc.thr_db, "-");
-    xline(axE, proc.peak_sample/fs*1e3, "--");
-    xline(axE, proc.win_start/fs*1e3, ":"); xline(axE, proc.win_end/fs*1e3, ":");
-    title(axE, "Energija i detekcija dogadaja");
-    xlabel(axE, "Vrijeme [ms]"); ylabel(axE, "dB"); grid(axE,"on");
-
-    cla(axT);
-    bar(axT, 1:3, result.tdoa_us);
-    yline(axT, max_tdoa_us, "r:"); yline(axT, -max_tdoa_us, "r:"); yline(axT, 0, "k--");
-    xticks(axT, 1:3); xticklabels(axT, {"M1-M2", "M1-M3", "M1-M4"});
-    ylabel(axT, "TDOA [us]");
-    title(axT, sprintf("Az=%+.1f deg, El=%+.1f deg, Q=%.2f", result.az, result.el, result.quality));
-    grid(axT,"on");
-
-    cla(axD); hold(axD,"on"); grid(axD,"on"); axis(axD,"equal");
-    [xs,ys,zs] = sphere(24);
-    surf(axD, xs, ys, zs, "FaceAlpha", 0.06, "EdgeAlpha", 0.05);
-    quiver3(axD,0,0,0,1.15,0,0,0,"k"); text(axD,1.25,0,0,"X");
-    quiver3(axD,0,0,0,0,1.15,0,0,"k"); text(axD,0,1.25,0,"Y");
-    quiver3(axD,0,0,0,0,0,1.15,0,"k"); text(axD,0,0,1.25,"Z");
-
-    center = mean(mic_pos,1);
-    scale = 1.3 / max_pair_distance(mic_pos);
-    mp = (mic_pos - center) * scale;
-    plot3(axD, mp(:,1), mp(:,2), mp(:,3), "ks", "MarkerFaceColor", "y", "MarkerSize", 7);
-    for i = 1:4
-        text(axD, mp(i,1), mp(i,2), mp(i,3), sprintf(" M%d", i));
-    end
-
-    if all(isfinite(result.u))
-        quiver3(axD, 0,0,0, result.u(1), result.u(2), result.u(3), 0, "r", "LineWidth", 3, "MaxHeadSize", 0.35);
-        plot3(axD, [0 result.u(1)], [0 result.u(2)], [0 0], "r:");
-    end
-    xlabel(axD,"X"); ylabel(axD,"Y"); zlabel(axD,"Z");
-    title(axD, "Smjer dolaska zvuka");
-    xlim(axD,[-1.2 1.2]); ylim(axD,[-1.2 1.2]); zlim(axD,[-1.2 1.2]);
-    view(axD,35,22);
+drawnow;
 end
 
-function dmax = max_pair_distance(p)
-    dmax = 0;
-    for i = 1:size(p,1)
-        for j = i+1:size(p,1)
-            dmax = max(dmax, norm(p(i,:) - p(j,:)));
-        end
-    end
+%% =========================================================================
+%  GCC-PHAT  -  G = FFT(ref) * conj(FFT(sig))
+%% =========================================================================
+function [xc, lags] = gcc_phat(ref, sig, max_l)
+ref = ref(:) - mean(ref);
+sig = sig(:) - mean(sig);
+n   = 2^nextpow2(numel(ref) + numel(sig));
+G   = fft(ref,n) .* conj(fft(sig,n));
+G   = G ./ (abs(G) + 1e-12);
+r   = real(ifft(G));
+r   = [r(end-max_l+1:end); r(1:max_l+1)];
+lags = (-max_l:max_l).';
+xc   = r(:);
 end
 
-function t = toc_or_zero()
-    persistent t0
-    if isempty(t0)
-        t0 = tic;
-        t = 0;
-    else
-        t = toc(t0);
+%% =========================================================================
+%  POMOCNE
+%% =========================================================================
+function d = max_pair_dist(p)
+d = 0;
+for i = 1:size(p,1)
+    for j = i+1:size(p,1)
+        d = max(d, norm(p(i,:)-p(j,:)));
     end
+end
+end
+
+function safe_clear(s)
+try
+    if isvalid(s), flush(s); delete(s); end
+catch
+end
 end

@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "microphone_config.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -18,8 +19,9 @@ static SemaphoreHandle_t ws_fds_mutex = NULL;
 /* ------------------------------------------------------------------ */
 /*  3D vizualizacija — minimalni WebGL                                  */
 /*    • Flat shader (bez svjetla)                                        */
-/*    • 3 prozirne ravnine: XY, XZ, YZ (alpha ≈ 0.12)                   */
-/*    • Slobodan orbit camera: vertikalno [-π/2+ε, +π/2-ε]              */
+/*    • Okvir = STM32 (Sound Localization): X naprijed, Y lijevo, Z gore */
+/*    • 3 prozirne ravnine: XY (baza, z=0), XZ (y=0), YZ (x=0)          */
+/*    • Slobodan orbit camera (up=+Z): vertikalno [-π/2+ε, +π/2-ε]      */
 /* ------------------------------------------------------------------ */
 static const char *INDEX_HTML =
 "<!DOCTYPE html><html><head>"
@@ -31,9 +33,16 @@ static const char *INDEX_HTML =
 "#hud{position:fixed;top:12px;left:12px;color:#fff;font:14px/1.6 monospace;"
 "background:rgba(0,0,0,.65);padding:8px 14px;border-radius:6px;pointer-events:none;}"
 "#sts{position:fixed;bottom:12px;left:12px;color:#888;font:12px monospace;}"
+"#mic-info{position:fixed;top:12px;right:12px;color:#f44;font:11px/1.4 monospace;"
+"background:rgba(0,0,0,.65);padding:8px 12px;border-radius:6px;pointer-events:none;"
+"max-width:180px;}"
+".mic-label{position:fixed;color:#f44;font:bold 13px monospace;background:rgba(0,0,0,0.7);"
+"padding:3px 6px;border-radius:3px;pointer-events:none;border:1px solid #f44;}"
 "</style></head><body>"
-"<div id='hud'>Azimuth: --&deg; | Polar: --&deg; | Strength: --</div>"
+"<div id='hud'>Azimuth: --&deg; | Elevation: --&deg; | Strength: --</div>"
 "<div id='sts'>Connecting...</div>"
+"<div id='mic-info'>Mikrofoni:<br></div>"
+"<div id='mic-labels'></div>"
 "<script>"
 
 /* --- WebGL canvas --- */
@@ -61,14 +70,19 @@ static const char *INDEX_HTML =
 "return c;}"
 "function pm(fov,asp,n,f){var t=Math.tan(fov*Math.PI/360),m=new Float32Array(16);"
 "m[0]=1/(t*asp);m[5]=1/t;m[10]=(f+n)/(n-f);m[11]=-1;m[14]=2*f*n/(n-f);return m;}"
+/* Generički look-at, svijet s up=+Z (STM32 okvir: Z gore). Gleda u ishodište. */
 "function lm(ex,ey,ez){"
 "var fx=-ex,fy=-ey,fz=-ez,l=Math.sqrt(fx*fx+fy*fy+fz*fz);fx/=l;fy/=l;fz/=l;"
-"var rx=-fz,rz=fx,l2=Math.sqrt(rx*rx+rz*rz);rx/=l2;rz/=l2;"
-"var ux=-rz*fy,uy=rz*fx-rx*fz,uz=rx*fy;"
+/* right = forward × worldUp(0,0,1) */
+"var rx=fy*1-fz*0,ry=fz*0-fx*1,rz=fx*0-fy*0;"
+"var l2=Math.sqrt(rx*rx+ry*ry+rz*rz);rx/=l2;ry/=l2;rz/=l2;"
+/* up = right × forward */
+"var ux=ry*fz-rz*fy,uy=rz*fx-rx*fz,uz=rx*fy-ry*fx;"
 "var m=new Float32Array(16);"
-"m[0]=rx;m[1]=ux;m[2]=-fx;m[4]=0;m[5]=uy;m[6]=-fy;m[8]=rz;m[9]=uz;m[10]=-fz;"
-"m[11]=0;m[15]=1;"
-"m[12]=-(rx*ex+rz*ez);m[13]=-(ux*ex+uy*ey+uz*ez);m[14]=fx*ex+fy*ey+fz*ez;"
+"m[0]=rx;m[1]=ux;m[2]=-fx;m[3]=0;"
+"m[4]=ry;m[5]=uy;m[6]=-fy;m[7]=0;"
+"m[8]=rz;m[9]=uz;m[10]=-fz;m[11]=0;"
+"m[12]=-(rx*ex+ry*ey+rz*ez);m[13]=-(ux*ex+uy*ey+uz*ez);m[14]=fx*ex+fy*ey+fz*ez;m[15]=1;"
 "return m;}"
 "function tm(x,y,z){return new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]);}"
 "function sm(s){return new Float32Array([s,0,0,0,0,s,0,0,0,0,s,0,0,0,0,1]);}"
@@ -146,9 +160,55 @@ static const char *INDEX_HTML =
 
 /* --- Pool zvučnih sfera (max 20, fade 5s) --- */
 "var pool=[];"
-"function addS(az,po){"
-"var a=az*Math.PI/180,p=po*Math.PI/180;"
-"pool.push({x:8*Math.sin(a)*Math.cos(p),y:8*Math.sin(p),z:-8*Math.cos(a)*Math.cos(p),t:Date.now()});"
+"var microphones=[];"
+
+"function loadMicrophones(){"
+"fetch('/api/microphones')"
+".then(r=>r.json())"
+".then(d=>{"
+"microphones=d.microphones||[];"
+"var mi=document.getElementById('mic-info');"
+"var html='Mikrofoni:<br>';"
+"microphones.forEach(m=>{"
+"html+='<span style=\"color:#f44\">'+m.name+'</span>: ('+m.x.toFixed(2)+', '+m.y.toFixed(2)+', '+m.z.toFixed(2)+') cm<br>';"
+"});"
+"mi.innerHTML=html;"
+"console.log('Mikrofoni učitani:',microphones);"
+"initMicrophoneLabels();"
+"})"
+".catch(e=>{console.error('Greška pri učitavanju mikrofona:',e);});"
+"}"
+
+"loadMicrophones();"
+
+"var labelContainer=document.getElementById('mic-labels');"
+
+"function initMicrophoneLabels(){"
+"for(var m=0;m<microphones.length;m++){"
+"var label=document.createElement('div');"
+"label.className='mic-label';"
+"label.textContent=microphones[m].name;"
+"labelContainer.appendChild(label);"
+"}"
+"}"
+
+"function updateMicrophoneLabels(){"
+"if(!microphones.length)return;"
+"var labels=labelContainer.querySelectorAll('.mic-label');"
+"for(var m=0;m<microphones.length;m++){"
+"var mx=microphones[m].x/10,my=microphones[m].y/10,mz=microphones[m].z/10;"
+"var p=new Float32Array(4);p[0]=mx;p[1]=my;p[2]=mz;p[3]=1;"
+"var vp=mm(VP,new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,mx,my,mz,1]));"
+"var sx=vp[12]/vp[15],sy=vp[13]/vp[15],sz=vp[14]/vp[15];"
+"var x=(sx+1)*cv.width/2,y=(-sy+1)*cv.height/2;"
+"if(labels[m]){labels[m].style.left=Math.round(x)+'px';labels[m].style.top=Math.round(y)+'px';}"
+"}"
+"}"
+
+/* az/el u STM32 okviru (X naprijed=0°, Y lijevo=90°, Z gore=elevacija). */
+"function addS(az,el){"
+"var a=az*Math.PI/180,e=el*Math.PI/180;"
+"pool.push({x:8*Math.cos(e)*Math.cos(a),y:8*Math.cos(e)*Math.sin(a),z:8*Math.sin(e),t:Date.now()});"
 "while(pool.length>20)pool.shift();}"
 
 /* --- WebSocket --- */
@@ -159,7 +219,7 @@ static const char *INDEX_HTML =
 "ws.onclose=function(e){sts.textContent='Disconnected ('+e.code+')';sts.style.color='#f44';};"
 "ws.onmessage=function(ev){"
 "try{var d=JSON.parse(ev.data);"
-"hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; | Polar: '+(d.polar||0).toFixed(1)+'&deg; | Strength: '+d.strength;"
+"hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; | Elevation: '+(d.polar||0).toFixed(1)+'&deg; | Strength: '+d.strength;"
 "addS(d.azimuth,d.polar||0);}catch(e){}};"
 
 /* --- Render loop --- */
@@ -171,12 +231,19 @@ static const char *INDEX_HTML =
 "requestAnimationFrame(render);"
 "gl.clearColor(.067,.067,.067,1);"
 "gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);"
-"var ex=cDst*Math.cos(cEl)*Math.sin(cAz);"
-"var ey=cDst*Math.sin(cEl);"
-"var ez=cDst*Math.cos(cEl)*Math.cos(cAz);"
+/* Orbit u STM32 okviru: Z je vertikala, pa cEl diže kameru po Z. */
+"var ex=cDst*Math.cos(cEl)*Math.cos(cAz);"
+"var ey=cDst*Math.cos(cEl)*Math.sin(cAz);"
+"var ez=cDst*Math.sin(cEl);"
 "VP=mm(pm(60,cv.width/cv.height,.1,300),lm(ex,ey,ez));"
 /* Opaque: head box + zvučne sfere */
-"drw(bBox,ID,[0,.67,1,1]);"
+// "drw(bBox,ID,[0,.67,1,1]);"
+/* Iscrtaj mikrofone kao male kuglice (crvene) */
+"for(var m=0;m<microphones.length;m++){"
+"var mx=microphones[m].x/10,my=microphones[m].y/10,mz=microphones[m].z/10;"
+"drw(bSph,mm(tm(mx,my,mz),sm(.3)),[1,.2,.2,1]);"
+"}"
+"updateMicrophoneLabels();"
 "var now=Date.now();"
 "for(var i=pool.length-1;i>=0;i--){"
 "var age=now-pool[i].t;"
@@ -185,9 +252,9 @@ static const char *INDEX_HTML =
 "drw(bSph,mm(tm(pool[i].x,pool[i].y,pool[i].z),sm(.5)),[f,.13*f,0,1]);}"
 /* Prozirne ravnine: XY (z=0), XZ (y=0), YZ (x=0) — depth write off da se ne kriju međusobno */
 "gl.depthMask(false);"
-"drw(bQuad,ID,[1,.35,.35,.12]);"             /* XY plane (crveno) */
-"drw(bQuad,rmX(HP),[.35,1,.35,.12]);"        /* XZ plane (zeleno) */
-"drw(bQuad,rmY(HP),[.35,.55,1,.12]);"        /* YZ plane (plavo) */
+"drw(bQuad,ID,[1,.35,.35,.12]);"             /* XY ravnina (z=0) — CRVENA */
+"drw(bQuad,rmY(HP),[.35,1,.35,.12]);"        /* XZ ravnina (y=0) — ZELENA */
+"drw(bQuad,rmX(HP),[.35,.55,1,.12]);"        /* YZ ravnina (x=0) — PLAVA */
 "gl.depthMask(true);"
 "}"
 "render();"
@@ -208,6 +275,45 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 static esp_err_t favicon_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "image/x-icon");
     httpd_resp_send(req, "", 0);
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: GET /api/microphones — Lokacije mikrofona kao JSON             */
+/* ------------------------------------------------------------------ */
+static esp_err_t microphones_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+    
+    /* Kreiraj JSON niz mikrofona */
+    const microphone_t *config = microphone_config_get_all();
+    int count = microphone_config_get_count();
+    
+    /* Procijenjena veličina JSON-a: ~60 bajtova po mikrofonu + header */
+    int buffer_size = 256 + (count * 80);
+    char *json = (char *)malloc(buffer_size);
+    if (!json) {
+        httpd_resp_send(req, "{\"error\":\"Memory allocation failed\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    
+    int offset = 0;
+    offset += snprintf(json + offset, buffer_size - offset, "{\"microphones\":[");
+    
+    for (int i = 0; i < count; i++) {
+        offset += snprintf(json + offset, buffer_size - offset,
+            "{\"name\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}",
+            config[i].name, config[i].x, config[i].y, config[i].z);
+        
+        if (i < count - 1) {
+            offset += snprintf(json + offset, buffer_size - offset, ",");
+        }
+    }
+    
+    offset += snprintf(json + offset, buffer_size - offset, "],\"count\":%d}", count);
+    
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    free(json);
+    
     return ESP_OK;
 }
 
@@ -340,10 +446,18 @@ void web_server_init(void) {
         .user_ctx = NULL,
     };
 
+    static const httpd_uri_t microphones_uri = {
+        .uri      = "/api/microphones",
+        .method   = HTTP_GET,
+        .handler  = microphones_get_handler,
+        .user_ctx = NULL,
+    };
+
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &root_uri);
         httpd_register_uri_handler(server, &ws_uri);
         httpd_register_uri_handler(server, &favicon_uri);
+        httpd_register_uri_handler(server, &microphones_uri);
         ESP_LOGI(TAG, "HTTP server pokrenut na portu 80");
     } else {
         ESP_LOGE(TAG, "Greška pri pokretanju HTTP servera");

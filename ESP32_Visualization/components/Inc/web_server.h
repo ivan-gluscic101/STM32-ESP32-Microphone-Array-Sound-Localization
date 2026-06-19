@@ -10,8 +10,11 @@ void web_server_init(void);
 
 /**
  * @brief Šalje podatke o kutu svim spojenim WebSocket klijentima.
- *        azimuth — kut u XZ ravnini (-90°..+90°, 0 = ispred mic-axisa),
- *        polar — visinski kut (0 = XZ ravnina, trenutno uvijek 0).
+ *        Koordinatni sustav je isti kao u glavnom projektu (Sound Localization):
+ *        azimuth — kut u XY ravnini [0°, 360°), 0° = +X naprijed, 90° = +Y lijevo,
+ *                  180° = nazad, 270° = desno.
+ *        polar   — elevacija [-90°, +90°], +90° = ravno gore (+Z), 0 = horizont.
+ *                  (Naziv parametra je povijesni; vrijednost je elevacija.)
  */
 void web_server_send_data(float azimuth, float polar, uint8_t strength);
 

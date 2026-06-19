@@ -37,18 +37,23 @@ volatile float    dbg_ch_delay_from_tau14;   /* = -avg(tau14_meas) / 3   */
  * MIN_RMS_THRESHOLD = glasnoća najjačeg kanala potrebna da se uopće pokrene
  * obrada; MIN_RMS_PER_CHANNEL je labaviji (0.2×) da JEDAN slabiji mikrofon ne
  * obori cijelu detekciju. Diži natrag ako šum počne okidati lažne detekcije. */
-#define MIN_RMS_THRESHOLD       10.0f
-#define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.2f)
+#define MIN_RMS_THRESHOLD       40.0f
+#define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.4f)
 
 /* Minimalni omjer pika GCC-PHAT korelacije i srednje |korelacije| (peak/mean).
- * Trenutačno 0.0 → gate je ISKLJUČEN: propušta svaki prozor, uključujući šum.
- * Vrati na ~1.3–1.5 nakon što potvrdiš detekciju, da odsiječeš čisti šum. */
-#define GCC_MIN_PEAK_QUALITY    0.0f
+ * Pravi pljesak tipično daje peak/mean ≥ 2.0; čisti šum je ~1.0-1.2.
+ * Podignut na 2.2: oštar pljesak daje uski, visok pik (visok peak/mean), dok
+ * refleks/drugi izvor u istom prozoru daje razmazaniju korelaciju (niži omjer) —
+ * pa se odbacuju "duple" lokalizacije gdje uz pljesak uleti i odjek. Spusti
+ * natrag prema 1.8 ako počne propuštati prave (tiše/dalje) pljeske. */
+#define GCC_MIN_PEAK_QUALITY    1.8f
 
 /* Broj LOC3D_Process poziva koji se ignoriraju nakon svake detekcije.
  * task_manager.c zove LOC3D_Process jednom po half-bufferu = 16 ms.
- * 19 × 16 ms ≈ 304 ms cooldown. */
-#define DETECTION_COOLDOWN_FRAMES  19
+ * 30 × 16 ms ≈ 480 ms cooldown — dovoljno da prođe rep pljeska i prvi odjeci
+ * prije nego se dopusti nova detekcija. Snizi ako gubiš stvarne uzastopne
+ * pljeske; digni ako i dalje vidiš duple okidaje. */
+#define DETECTION_COOLDOWN_FRAMES  15
 
 static uint16_t s_cooldown = 0;
 
@@ -272,12 +277,23 @@ uint8_t LOC3D_Process(const uint16_t *buf, loc3d_result_t *out)
     if (norm < 1e-9f) return 0;
     sx /= norm; sy /= norm; sz /= norm;
 
-    /* 7. Kutovi (azimut u rasponu [-180, 180], elevacija [-90, 90]) */
-    float az_rad = atan2f(sy, sx);
-    float el_rad = asinf(sz);
+    /* 7. Kutovi.
+     *
+     * Azimut: atan2f vraća (-PI, +PI] = (-180, +180]. Wrapamo u puni krug
+     * [0, 360) tako da negativnim kutovima dodamo 360 — izlaz az_tenth je
+     * sada 0..3600 tenths (0..360.0 stupnjeva), uvijek nenegativan.
+     *
+     * Elevacija: asinf vraća [-PI/2, +PI/2] = [-90, +90]. To je FIZIČKI pun
+     * raspon elevacije (−90 = ravno dolje, 0 = horizont, +90 = ravno gore) —
+     * ne wrapamo je u 360 jer elevacija po definiciji ne prelazi ±90.
+     */
+    float az_deg = atan2f(sy, sx) * (180.0f / PI);
+    if (az_deg < 0.0f) az_deg += 360.0f;   /* (-180,180] → [0,360) */
 
-    out->az_tenth = (int16_t)(az_rad * (1800.0f / PI));
-    out->el_tenth = (int16_t)(el_rad * (1800.0f / PI));
+    float el_deg = asinf(sz) * (180.0f / PI);
+
+    out->az_tenth = (int16_t)(az_deg * 10.0f);   /* 0 .. 3600  */
+    out->el_tenth = (int16_t)(el_deg * 10.0f);   /* -900 .. +900 */
 
     /* 8. Jakost — log mapa (dB-like) za vizualizaciju (pljesak RMS≈30..500).
      * 20·log10(rms+1): RMS=20→~26, RMS=100→~40, RMS=500→~54 (ne doseže 100). */

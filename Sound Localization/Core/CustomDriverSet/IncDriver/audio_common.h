@@ -13,6 +13,13 @@
  *     alocira ~68 KB tablica u BSS. 0 = pravi ADC podaci (mock se ne kompajlira). */
 #define USE_MOCK_ADC          0
 
+/* ── Lokalizacijski mod ────────────────────────────────────────────────────────
+ * 1 = 3-mikrofonska lokalizacija (M1,M2,M3; M4 se uzorkuje ali se NE koristi).
+ *     Koristi loc3d_3mic.c — elevacija uz pretpostavku z >= 0. Uključi dok je
+ *     4. mikrofon (RANK4, PC2) neispravan.
+ * 0 = puna 4-mikrofonska 3D lokalizacija (sound_loc_3d.c). */
+#define USE_3MIC_LOC          1
+
 /* ── Vremenski parametri ───────────────────────────────────────────────────── */
 /* TIM8 ARR=2655 @ 170 MHz → okida ADC svakih 15.625 µs = 64 kHz po kanalu   */
 #define SAMPLE_RATE_HZ        64000
@@ -20,8 +27,8 @@
 
 /* ── ADC sekvencijalni offset ─────────────────────────────────────────────── */
 /* ADC clock = PCLK/4 = 170 MHz/4 = 42.5 MHz → perioda 23.53 ns              */
-/* Svaki kanal = 2.5 (sampling) + 12.5 (conv) = 15 ciklusa = 352.9 ns        */
-#define CH_DELAY_S            352.9e-9f
+/* Svaki kanal = 24.5 (sampling) + 12.5 (conv) = 37 ciklusa = 870.6 ns       */
+#define CH_DELAY_S            870.6e-9f
 
 /* ── Akustika ──────────────────────────────────────────────────────────────── */
 #define SPEED_OF_SOUND        343.0f    /* m/s pri ~20°C */

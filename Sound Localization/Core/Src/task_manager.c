@@ -1,10 +1,23 @@
 #include "task_manager.h"
 #include "adc_driver.h"
 #include "uart_driver.h"
-#include "sound_loc_3d.h"
-#include "gcc_phat.h"
 #include "audio_common.h"
+#include "gcc_phat.h"
 #include <string.h>
+
+/* Lokalizacijski mod biran u audio_common.h (USE_3MIC_LOC). Aliasi ispod čine
+ * ostatak koda neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi. */
+#if USE_3MIC_LOC
+#include "loc3d_3mic.h"
+typedef loc3d_3mic_result_t loc_result_t;
+#define LOC_INIT()            LOC3D_3MIC_Init()
+#define LOC_PROCESS(b, r)     LOC3D_3MIC_Process((b), (r))
+#else
+#include "sound_loc_3d.h"
+typedef loc3d_result_t loc_result_t;
+#define LOC_INIT()            LOC3D_Init()
+#define LOC_PROCESS(b, r)     LOC3D_Process((b), (r))
+#endif
 
 /* USE_MOCK_ADC je definiran u audio_common.h (dijeli ga mock_adc.c radi
  * uvjetnog kompajliranja mock tablica). */
@@ -68,7 +81,7 @@ static void StartACQTask(void const *argument)
 
 static void StartFFTTask(void const *argument)
 {
-    loc3d_result_t result;
+    loc_result_t result;
     uint8_t read_idx;
 
     for (;;) {
@@ -85,9 +98,9 @@ static void StartFFTTask(void const *argument)
          * GCC_SnapshotRaw prepisao dbg_raw_chX koji UART_Task upravo šalje.
          * Sliding buffer se i dalje održava gore, pa ne gubimo kontinuitet. */
         if (!capture_ready) {
-            /* LOC3D_Process interno traži energetski vrh i centrira prozor te
+            /* LOC_PROCESS interno traži energetski vrh i centrira prozor te
              * napuni dbg_raw_chX (GCC_SnapshotRaw) pri detekciji. */
-            if (LOC3D_Process(sliding_buf, &result)) {
+            if (LOC_PROCESS(sliding_buf, &result)) {
                 capture_ready = 1;   /* dbg_raw_chX sada drži ovaj prozor */
                 xQueueSend(queueResultHandle, &result, 0);
             }
@@ -97,7 +110,7 @@ static void StartFFTTask(void const *argument)
 
 static void StartUARTTask(void const *argument)
 {
-    loc3d_result_t r;
+    loc_result_t r;
 
     for (;;) {
         if (xQueueReceive(queueResultHandle, &r, portMAX_DELAY) == pdTRUE) {
@@ -106,11 +119,13 @@ static void StartUARTTask(void const *argument)
             /* Nakon kuta pošalji i sirove uzorke (blocking) ako su spremni.
              * Šaljemo izravno iz dbg_raw_chX — FFT_Task ih ne dira dok je
              * capture_ready postavljen. */
-            if (capture_ready) {
+            /* if (capture_ready) {
                 UART_SendRawCapture(dbg_raw_ch0, dbg_raw_ch1,
                                     dbg_raw_ch2, dbg_raw_ch3);
-                capture_ready = 0;
-            }
+            } */
+            /* Resetiraj zastavicu bez obzira na slanje raw-a — inače FFT_Task
+             * prestaje pozivati LOC3D_Process nakon prve detekcije. */
+            capture_ready = 0;
         }
     }
 }
@@ -119,13 +134,13 @@ static void StartUARTTask(void const *argument)
 
 void app_tasks_init(void)
 {
-    LOC3D_Init();   /* izračunaj M_geom iz pozicija mikrofona prije pokretanja taskova */
+    LOC_INIT();   /* izračunaj M_geom iz pozicija mikrofona prije pokretanja taskova */
 
     osMessageQDef(queueDmaEvent, 8, uint32_t);
     queueDmaEventHandle = osMessageCreate(osMessageQ(queueDmaEvent), NULL);
 
     queueSnapshotHandle = xQueueCreate(ACQ_NUM_BUFFERS - 1, sizeof(uint8_t));
-    queueResultHandle   = xQueueCreate(4, sizeof(loc3d_result_t));
+    queueResultHandle   = xQueueCreate(4, sizeof(loc_result_t));
 
     osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime, 0, 256);
     (void)osThreadCreate(osThread(ACQ_Task),  NULL);

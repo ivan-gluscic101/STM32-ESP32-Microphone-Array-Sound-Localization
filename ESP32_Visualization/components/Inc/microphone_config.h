@@ -8,16 +8,20 @@
  * @file microphone_config.h
  * @brief Konfiguracija lokacija mikrofona kao matrica
  * 
- * Geometrija mikrofona — pozicije u cm (pretvaraju se u m prema potrebi).
- * M1 je u ishodištu (referentni mikrofon za TDOA).
- * Baza M1-M2-M3 je ~jednakostraničan trokut (~10 cm bridovi).
- * M4 je vrh iznad baze (mjerenje elevacije).
- * 
+ * Geometrija mikrofona — pozicije u cm. MORA odgovarati STM32 strani
+ * (Core/CustomDriverSet/IncDriver/audio_common.h, MIC*_{X,Y,Z} u metrima);
+ * ovdje se koristi SAMO za 3D vizualizaciju u web pregledniku (crtanje
+ * mikrofona), ne za izračun — STM32 računa azimut/elevaciju.
+ *
+ * M1, M2, M3 = jednakostranični trokut, stranica 13 cm, u ravnini z=0.
+ * M1 u ishodištu; M2/M3 simetrični oko X-osi (M2 +Y lijevo, M3 −Y desno),
+ * bisektrisa M2/M3 pada na +X. M4 je vrh iznad baze (zasad se ne koristi).
+ *
  * Koordinatni sustav:
  *   +X → 0°  naprijed (bisektrisa M2/M3)
  *   +Y → +90° lijevo (M2)
- *   −Y → −90° desno (M3)
- *   −X → ±180° nazad (M1)
+ *   −X → 180° nazad (M1 strana)
+ *   −Y → 270° desno (M3)
  *   +Z → elevacija +90° (gore, M4)
  */
 
@@ -32,12 +36,13 @@ typedef struct {
     const char *name; /* označava, npr. "M1", "M2", ... */
 } microphone_t;
 
-/* Matrica lokacija mikrofona — lagano mijenjiva konfiguracija */
+/* Matrica lokacija mikrofona — usklađena s audio_common.h (cm = m × 100).
+ * Jednakostranični trokut a=13cm: x = a·√3/2 = 11.2583, y = a/2 = 6.5 cm. */
 static const microphone_t microphones[NUM_MICROPHONES] = {
-    { .x =  0.00f, .y =  0.00f, .z =  0.00f, .name = "M1" },  /* referentni */
-    { .x =  8.67f, .y =  5.00f, .z =  0.00f, .name = "M2" },  /* lijevo */
-    { .x =  8.67f, .y = -5.00f, .z =  0.00f, .name = "M3" },  /* desno */
-    { .x =  5.00f, .y =  0.00f, .z =  8.00f, .name = "M4" }   /* vrh */
+    { .x =  0.0000f, .y =  0.00f, .z = 0.00f, .name = "M1" },  /* referentni */
+    { .x = 11.2583f, .y =  6.50f, .z = 0.00f, .name = "M2" },  /* lijevo (+Y) */
+    { .x = 11.2583f, .y = -6.50f, .z = 0.00f, .name = "M3" },  /* desno (−Y) */
+    { .x =  0.0000f, .y =  0.00f, .z = 8.00f, .name = "M4" }   /* vrh */
 };
 
 /**

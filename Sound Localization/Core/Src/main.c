@@ -159,7 +159,7 @@ static void MX_TIM8_Init(void)
   LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM8);
   TIM_InitStruct.Prescaler        = 0;
   TIM_InitStruct.CounterMode      = LL_TIM_COUNTERMODE_UP;
-  TIM_InitStruct.Autoreload       = 2655;
+  TIM_InitStruct.Autoreload       = 884;    /* 170 MHz / 885 ≈ 192.09 kHz */
   TIM_InitStruct.ClockDivision    = LL_TIM_CLOCKDIVISION_DIV1;
   TIM_InitStruct.RepetitionCounter = 0;
   LL_TIM_Init(TIM8, &TIM_InitStruct);

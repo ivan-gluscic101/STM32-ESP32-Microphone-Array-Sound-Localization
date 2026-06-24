@@ -11,38 +11,35 @@
  * uvjeta jediničnog vektora uz pretpostavku z >= 0.
  *
  * Debug varijable imaju prefiks dbg3_ da se ne sudaraju s dbg_* iz sound_loc_3d.c
- * ako se oba modula linkaju zajedno.
+ * ako se oba modula linkaju zajedno. Čitaju se u debuggeru; ne idu na UART.
  */
 
-/* Debug snapshot — postavi se pri svakoj detekciji. */
+/* Debug snapshot — postavi se pri svakoj detekciji. Čitaj u debuggeru. */
 volatile float dbg3_tau12_meas, dbg3_tau13_meas;
 volatile float dbg3_tau12_corr, dbg3_tau13_corr;
 volatile float dbg3_qual12, dbg3_qual13;
 volatile float dbg3_rms[4];
 volatile float dbg3_sx, dbg3_sy, dbg3_sz;
-volatile uint32_t dbg3_frame_offset;
-
-/* Akumulacija TDOA mjerenja (za eksperimentalno određivanje CH_DELAY_S). */
-volatile float    dbg3_tau_sum[2]   = { 0.0f, 0.0f };
-volatile uint32_t dbg3_tau_count    = 0;
-volatile float    dbg3_ch_delay_from_tau12;   /* = -avg(tau12_meas)       */
-volatile float    dbg3_ch_delay_from_tau13;   /* = -avg(tau13_meas) / 2   */
 
 #ifndef PI
 #define PI 3.14159265358979323846f
 #endif
 
-/* Detekcijski pragovi — isti kao u sound_loc_3d.c (slabiji/neujednačeni mikrofoni).
- * RMS gate se sada radi SAMO nad kanalima M1/M2/M3 (M4 se ne gleda). */
-#define MIN_RMS_THRESHOLD       40.0f
+/* Detekcijski pragovi (slabiji/neujednačeni mikrofoni). RMS gate se radi SAMO
+ * nad kanalima M1/M2/M3 (M4 se ne gleda).
+ *   MIN_RMS_THRESHOLD   = glasnoća najjačeg kanala potrebna da krene obrada
+ *   MIN_RMS_PER_CHANNEL = labaviji prag (0.4×) da jedan slabiji mic ne obori sve */
+#define MIN_RMS_THRESHOLD       50.0f
 #define MIN_RMS_PER_CHANNEL     (MIN_RMS_THRESHOLD * 0.4f)
 
-/* Minimalni omjer pika GCC-PHAT korelacije i srednje |korelacije| (peak/mean). */
-#define GCC_MIN_PEAK_QUALITY    1.8f
+/* Minimalni omjer pika GCC-PHAT korelacije i srednje |korelacije| (peak/mean).
+ * Pravi pljesak ≥ ~2.0; čisti šum ~1.0-1.2. */
+#define GCC_MIN_PEAK_QUALITY    2.0f
 
 /* Broj LOC3D_3MIC_Process poziva koji se ignoriraju nakon svake detekcije
- * (cooldown). 15 × 16 ms ≈ 240 ms. */
-#define DETECTION_COOLDOWN_FRAMES  15
+ * (cooldown). Frame = half-buffer = 1024/192kHz ≈ 5.33 ms. 45 × 5.33 ms ≈ 240 ms
+ * — propusti rep pljeska i prve odjeke. */
+#define DETECTION_COOLDOWN_FRAMES  45
 
 static uint16_t s_cooldown = 0;
 
@@ -94,23 +91,17 @@ void LOC3D_3MIC_Init(void)
     }
 }
 
-/* Debug brojač — broji koliko je puta LOC3D_3MIC_Process pozvan. */
-volatile uint32_t dbg3_loc3d_call_count = 0;
-volatile float    dbg3_last_rms[4];
-
 /*
- * Sliding-window energy search — identično sound_loc_3d.c. Energija se i dalje
- * računa preko sva 4 kanala; M4 je neispravan ali njegova energija ne kvari
- * lociranje vrha bitno (DC/šum je relativno konstantan). Ako se pokaže da M4
- * remeti, lako se ovdje preskoči ch == 3.
+ * Sliding-window energy search — centrira GCC prozor na energetski vrh pljeska.
+ * Energija se računa samo nad kanalima M1/M2/M3 (M4 ignoriran).
  */
 static uint32_t find_peak_offset(const uint16_t *buf)
 {
     const uint32_t TOTAL = 2u * SAMPLES_PER_CHANNEL;
-    const uint32_t PROBE = 16u;   /* ~250 µs @ 64 kHz */
+    const uint32_t PROBE = 16u;   /* ~83 µs @ 192 kHz */
     const uint32_t HALF  = SAMPLES_PER_CHANNEL / 2u;
 
-    /* Energija prvog prozora — samo kanali 0..2 (M4 ignoriran). */
+    /* Energija prvog prozora — kanali 0..2. */
     uint32_t win_e = 0u;
     for (uint32_t i = 0u; i < PROBE; i++) {
         const uint16_t *s = &buf[i * NUM_CH];
@@ -142,26 +133,20 @@ static uint32_t find_peak_offset(const uint16_t *buf)
 
 uint8_t LOC3D_3MIC_Process(const uint16_t *buf, loc3d_3mic_result_t *out)
 {
-    dbg3_loc3d_call_count++;
-
-    /* Cooldown — preskači obradu odmah, bez skupog peak-findinga */
+    /* Cooldown — preskoči obradu odmah, bez skupog peak-findinga. */
     if (s_cooldown > 0) { s_cooldown--; return 0; }
 
-    /* 1. Nađi gdje je pljesak — GCC prozor centriran na energetski vrh */
+    /* 1. Nađi gdje je pljesak — GCC prozor centriran na energetski vrh. */
     uint32_t frame_offset = find_peak_offset(buf);
-    dbg3_frame_offset = frame_offset;
 
-    /* 2. Deinterleave + DC removal + Hann prozor (ch3 = M4 se puni ali ne koristi) */
+    /* 2. Deinterleave + DC removal + Hann prozor (ch3 = M4 se puni ali ne koristi). */
     GCC_ExtractChannels(buf, frame_offset, s_ch0, s_ch1, s_ch2, s_ch3);
 
-    /* 3. RMS gate — SAMO M1/M2/M3 (M4 neispravan, isključen iz gatea) */
+    /* 3. RMS gate — SAMO M1/M2/M3 (M4 neispravan, isključen iz gatea). */
     float rms0 = GCC_RMS(s_ch0);
     float rms1 = GCC_RMS(s_ch1);
     float rms2 = GCC_RMS(s_ch2);
     float rms3 = GCC_RMS(s_ch3);   /* samo za debug uvid */
-
-    dbg3_last_rms[0] = rms0; dbg3_last_rms[1] = rms1;
-    dbg3_last_rms[2] = rms2; dbg3_last_rms[3] = rms3;
 
     float rms_max = rms0;
     if (rms1 > rms_max) rms_max = rms1;
@@ -174,7 +159,7 @@ uint8_t LOC3D_3MIC_Process(const uint16_t *buf, loc3d_3mic_result_t *out)
     if (rms_max < MIN_RMS_THRESHOLD)    return 0;
     if (rms_min < MIN_RMS_PER_CHANNEL)  return 0;
 
-    /* 4. GCC-PHAT za dva para (M1 = referentni) */
+    /* 4. GCC-PHAT za dva para (M1 = referentni). */
     float qual12, qual13;
 
     GCC_PHAT(s_ch0, s_ch1, s_corr);
@@ -183,31 +168,19 @@ uint8_t LOC3D_3MIC_Process(const uint16_t *buf, loc3d_3mic_result_t *out)
     GCC_PHAT(s_ch0, s_ch2, s_corr);
     float tau13_meas = GCC_FindTDOA(s_corr, &qual13);
 
-    /* Debug: kvaliteta oba para — PRIJE gatea da se vidi koji par padne. */
     dbg3_qual12 = qual12;
     dbg3_qual13 = qual13;
 
-    /* Quality gate — odbaci frame ako je ijedan par korelacija ravna (šum). */
+    /* Quality gate — odbaci frame ako je ijedan par korelacija ravan (šum). */
     if (qual12 < GCC_MIN_PEAK_QUALITY ||
         qual13 < GCC_MIN_PEAK_QUALITY) return 0;
 
-    /* Detekcija prošla — snimi sirovi sadržaj poravnatog prozora za debug. */
+    /* Detekcija prošla — snimi sirovi sadržaj poravnatog prozora za debug/UART. */
     GCC_SnapshotRaw(buf, frame_offset);
 
-    /* Debug snapshot ključnih veličina. */
     dbg3_tau12_meas = tau12_meas;
     dbg3_tau13_meas = tau13_meas;
     dbg3_rms[0] = rms0; dbg3_rms[1] = rms1; dbg3_rms[2] = rms2; dbg3_rms[3] = rms3;
-
-    /* Akumuliraj za CH_DELAY estimaciju */
-    dbg3_tau_sum[0] += tau12_meas;
-    dbg3_tau_sum[1] += tau13_meas;
-    dbg3_tau_count++;
-    if (dbg3_tau_count > 0) {
-        float n = (float)dbg3_tau_count;
-        dbg3_ch_delay_from_tau12 = -dbg3_tau_sum[0] / n;
-        dbg3_ch_delay_from_tau13 = -dbg3_tau_sum[1] / (2.0f * n);
-    }
 
     /* 5. Korekcija ADC sekvencijalnog pomaka.
      *   tau_meas = T_j − T_1 − (j−1)·CH_DELAY  →  T_j − T_1 = tau_meas + (j−1)·CH_DELAY
@@ -225,10 +198,8 @@ uint8_t LOC3D_3MIC_Process(const uint16_t *buf, loc3d_3mic_result_t *out)
 
     /* 7. Rekonstrukcija sz uz pretpostavku z >= 0. (sx, sy) su komponente
      * jediničnog smjera u ravnini, pa je sx^2 + sy^2 <= 1 idealno. Mjerni šum
-     * ili izvor blizu horizonta mogu dati sxy^2 > 1 — tada clampamo na 1 (sz=0).
-     *
-     * Normaliziramo (sx, sy) tako da cijeli (sx, sy, sz) bude jedinični:
-     *   ako je sxy2 > 1, skaliramo (sx, sy) na jediničnu kružnicu i sz = 0. */
+     * ili izvor blizu horizonta mogu dati sxy^2 > 1 — tada skaliramo (sx, sy) na
+     * jediničnu kružnicu i sz = 0. */
     float sxy2 = sx * sx + sy * sy;
     float sz;
     if (sxy2 > 1.0f) {
@@ -252,12 +223,13 @@ uint8_t LOC3D_3MIC_Process(const uint16_t *buf, loc3d_3mic_result_t *out)
     out->az_tenth = (int16_t)(az_deg * 10.0f);   /* 0 .. 3600 */
     out->el_tenth = (int16_t)(el_deg * 10.0f);   /* 0 .. +900 */
 
-    /* 9. Jakost — log mapa (dB-like), kao u glavnoj verziji. */
+    /* 9. Jakost — log mapa (dB-like). */
     float str_f = 20.0f * log10f(rms_max + 1.0f);
     if (str_f < 1.0f)    str_f = 1.0f;
     if (str_f > 100.0f)  str_f = 100.0f;
     out->strength = (uint8_t)str_f;
 
     s_cooldown = DETECTION_COOLDOWN_FRAMES;
+
     return 1;
 }

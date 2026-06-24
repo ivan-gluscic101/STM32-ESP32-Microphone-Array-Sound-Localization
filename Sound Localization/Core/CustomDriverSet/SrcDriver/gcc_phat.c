@@ -72,9 +72,6 @@ void GCC_SnapshotRaw(const uint16_t *buf, uint32_t frame_offset)
         dbg_raw_ch2[s] = p[s * NUM_CH + 2];
         dbg_raw_ch3[s] = p[s * NUM_CH + 3];
     }
-    uint8_t tmp;
-    tmp = 0;
-    (void) tmp;
 }
 
 float GCC_RMS(const float *ch)
@@ -148,41 +145,40 @@ void GCC_PHAT(const float *ref, const float *sig, float *corr)
 float GCC_FindTDOA(const float *corr, float *qual_out)
 {
     /* Maksimum samo unutar fizički mogućeg raspona lagova.
-     * Za 10 cm brid pri 64 kHz: max ≈ 18.66 uzoraka → TDOA_MAX_SAMPLES = 20. */
+     * Za 13 cm brid pri 192 kHz: max ≈ 72.8 uzoraka → TDOA_MAX_SAMPLES = 74. */
     const int max_lag = TDOA_MAX_SAMPLES;
 
-    /* Traži apsolutni peak — hvata i negativne pikove (invertiran polaritet kanala). */
+    /* Svi mikrofoni su istog polariteta, pa pravi vrh GCC-PHAT korelacije mora
+     * biti POZITIVAN (conj(X)·Y konvencija). Tražimo maksimum po stvarnoj, ne
+     * apsolutnoj vrijednosti — fabs bi mogao uhvatiti negativan side-lobe od
+     * refleksije u protufazi i dati krivi lag (efekt "okretanja faze"). */
     int   max_idx  = 0;
-    float best_abs = fabsf(corr[0]);
+    float best_val = corr[0];
 
     /* Pozitivni lagovi: 1 … max_lag */
     for (int i = 1; i <= max_lag; i++) {
-        float a = fabsf(corr[i]);
-        if (a > best_abs) { best_abs = a; max_idx = i; }
+        if (corr[i] > best_val) { best_val = corr[i]; max_idx = i; }
     }
     /* Negativni lagovi: cirkularno na kraju buffera (FFT_SIZE-max_lag … FFT_SIZE-1) */
     for (int i = FFT_SIZE - max_lag; i < FFT_SIZE; i++) {
-        float a = fabsf(corr[i]);
-        if (a > best_abs) { best_abs = a; max_idx = i; }
+        if (corr[i] > best_val) { best_val = corr[i]; max_idx = i; }
     }
 
-    /* Quality: omjer apsolutnog pika i srednje apsolutne vrijednosti cijele korelacije. */
+    /* Quality: omjer pika i srednje apsolutne vrijednosti cijele korelacije. */
     if (qual_out) {
         float sum = 0.0f;
         for (int i = 0; i < FFT_SIZE; i++) sum += fabsf(corr[i]);
         float mean_abs = sum / (float)FFT_SIZE;
-        *qual_out = (mean_abs > 1e-9f) ? (best_abs / mean_abs) : 0.0f;
+        *qual_out = (mean_abs > 1e-9f) ? (best_val / mean_abs) : 0.0f;
     }
 
-    /* Parabolička interpolacija s cirkularnim susjedima — radi na APSOLUTNIM
-     * vrijednostima da uvijek interpolira prema vrhu, neovisno o predznaku.
-     * Inače za negativan (invertiran) pik parabola se okrene naopako i delta
-     * pokazuje od vrha → sub-sample pogreška do ±0.5 uzorka u TDOA. */
+    /* Parabolička interpolacija s cirkularnim susjedima oko (pozitivnog) vrha
+     * za sub-sample preciznost. */
     int   il = (max_idx == 0)            ? (FFT_SIZE - 1) : (max_idx - 1);
     int   ir = (max_idx == FFT_SIZE - 1) ? 0              : (max_idx + 1);
-    float c0 = fabsf(corr[il]);
-    float c1 = best_abs;
-    float c2 = fabsf(corr[ir]);
+    float c0 = corr[il];
+    float c1 = best_val;
+    float c2 = corr[ir];
 
     float denom = (c0 - 2.0f * c1 + c2);
     float delta = 0.0f;

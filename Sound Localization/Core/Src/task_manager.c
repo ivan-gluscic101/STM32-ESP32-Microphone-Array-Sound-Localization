@@ -8,10 +8,17 @@
 /* Lokalizacijski mod biran u audio_common.h (USE_3MIC_LOC). Aliasi ispod čine
  * ostatak koda neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi. */
 #if USE_3MIC_LOC
-#include "loc3d_3mic.h"
-typedef loc3d_3mic_result_t loc_result_t;
-#define LOC_INIT()            LOC3D_3MIC_Init()
-#define LOC_PROCESS(b, r)     LOC3D_3MIC_Process((b), (r))
+  #if USE_TIME_DOMAIN_LOC
+    #include "loc3d_3mic_time.h"
+    typedef loc3d_3mic_time_result_t loc_result_t;
+    #define LOC_INIT()            LOC3D_3MIC_TIME_Init()
+    #define LOC_PROCESS(b, r)     LOC3D_3MIC_TIME_Process((b), (r))
+  #else
+    #include "loc3d_3mic.h"
+    typedef loc3d_3mic_result_t loc_result_t;
+    #define LOC_INIT()            LOC3D_3MIC_Init()
+    #define LOC_PROCESS(b, r)     LOC3D_3MIC_Process((b), (r))
+  #endif
 #else
 #include "sound_loc_3d.h"
 typedef loc3d_result_t loc_result_t;
@@ -39,11 +46,10 @@ static uint16_t acq_snapshot[ACQ_NUM_BUFFERS][HALF_BUFFER];
  * 2 × HALF_BUFFER × 2 B = 16 KB u BSS-u. */
 static uint16_t sliding_buf[2 * HALF_BUFFER];
 
-/* Capture sirovih uzoraka za ESP32 šalje se IZRAVNO iz dbg_raw_chX (gcc_phat.c)
- * da ne trošimo dodatnih 8 KB RAM-a. capture_ready zamrzava obradu između
- * detekcije i kraja UART slanja (8 KB @115200 ≈ 0.7 s): dok je postavljen,
- * FFT_Task ne zove LOC3D_Process pa GCC_SnapshotRaw ne prepisuje dbg_raw_chX
- * koji UART_Task upravo šalje. Producer: FFT_Task. Consumer: UART_Task. */
+/* Raw CSV se šalje IZRAVNO iz dbg_raw_chX (gcc_phat.c). capture_ready zamrzava
+ * obradu između detekcije i kraja UART slanja (CSV ~2 s @115200): dok je
+ * postavljen, FFT_Task ne zove LOC_PROCESS pa GCC_SnapshotRaw ne prepisuje
+ * dbg_raw_chX koji UART_Task upravo ispisuje. Producer: FFT_Task. Consumer: UART_Task. */
 static volatile uint8_t capture_ready = 0;
 
 /* ── Task implementacije ─────────────────────────────────────────────────── */
@@ -94,11 +100,11 @@ static void StartFFTTask(void const *argument)
                acq_snapshot[read_idx],
                HALF_BUFFER * sizeof(uint16_t));
 
-        /* Dok prethodni capture još nije poslan, ne pokreći obradu — inače bi
+        /* Dok prethodni raw CSV još nije ispisan, ne pokreći obradu — inače bi
          * GCC_SnapshotRaw prepisao dbg_raw_chX koji UART_Task upravo šalje.
          * Sliding buffer se i dalje održava gore, pa ne gubimo kontinuitet. */
         if (!capture_ready) {
-            /* LOC_PROCESS interno traži energetski vrh i centrira prozor te
+            /* LOC_PROCESS interno traži energetski vrh, centrira prozor te
              * napuni dbg_raw_chX (GCC_SnapshotRaw) pri detekciji. */
             if (LOC_PROCESS(sliding_buf, &result)) {
                 capture_ready = 1;   /* dbg_raw_chX sada drži ovaj prozor */
@@ -116,15 +122,15 @@ static void StartUARTTask(void const *argument)
         if (xQueueReceive(queueResultHandle, &r, portMAX_DELAY) == pdTRUE) {
             UART_SendAngle3DPacket(r.az_tenth, r.el_tenth, r.strength);
 
-            /* Nakon kuta pošalji i sirove uzorke (blocking) ako su spremni.
-             * Šaljemo izravno iz dbg_raw_chX — FFT_Task ih ne dira dok je
-             * capture_ready postavljen. */
+            /* Raw CSV ispis uzoraka prozora detekcije zasad je ISKLJUČEN. Sadržaj
+             * prozora i dalje stoji u dbg_raw_chX (dostupno u debuggeru). Za
+             * ponovni ispis na ESP32 monitor odkomentiraj: */
             /* if (capture_ready) {
-                UART_SendRawCapture(dbg_raw_ch0, dbg_raw_ch1,
-                                    dbg_raw_ch2, dbg_raw_ch3);
+                UART_SendRawCaptureCSV(dbg_raw_ch0, dbg_raw_ch1,
+                                       dbg_raw_ch2, dbg_raw_ch3);
             } */
-            /* Resetiraj zastavicu bez obzira na slanje raw-a — inače FFT_Task
-             * prestaje pozivati LOC3D_Process nakon prve detekcije. */
+
+            /* Otpusti zamrzavanje — FFT_Task smije ponovno tražiti detekcije. */
             capture_ready = 0;
         }
     }

@@ -20,13 +20,22 @@
  * 0 = puna 4-mikrofonska 3D lokalizacija (sound_loc_3d.c). */
 #define USE_3MIC_LOC          1
 
+/* ── Metoda TDOA (samo kad je USE_3MIC_LOC = 1) ───────────────────────────────
+ * 0 = GCC-PHAT u frekvencijskoj domeni (loc3d_3mic.c) — robusno, FFT-bazirano.
+ * 1 = TIME-domain onset TDOA (loc3d_3mic_time.c) — ukloni DC, traži trenutak
+ *     dolaska (prag na amplitudi) po kanalu, TDOA iz razmaka onseta. Bez FFT-a. */
+#define USE_TIME_DOMAIN_LOC   1
+
 /* ── Vremenski parametri ───────────────────────────────────────────────────── */
-/* TIM8 ARR=2655 @ 170 MHz → okida ADC svakih 15.625 µs = 64 kHz po kanalu   */
-#define SAMPLE_RATE_HZ        64000
-#define SAMPLE_PERIOD_S       (1.0f / SAMPLE_RATE_HZ)          /* 15.625 µs   */
+/* TIM8 ARR=884 @ 170 MHz → okida ADC svakih 5.21 µs = 192.09 kHz po kanalu.
+ * Viša fs = sitniji uzorak = finija kutna rezolucija (time-domain TDOA ovisi
+ * linearno o fs). ADC scan (4×870.6 ns = 3.48 µs) i dalje stane u 5.21 µs. */
+#define SAMPLE_RATE_HZ        192000
+#define SAMPLE_PERIOD_S       (1.0f / SAMPLE_RATE_HZ)          /* 5.208 µs    */
 
 /* ── ADC sekvencijalni offset ─────────────────────────────────────────────── */
-/* ADC clock = PCLK/4 = 170 MHz/4 = 42.5 MHz → perioda 23.53 ns              */
+/* ADC clock = PCLK/4 = 170 MHz/4 = 42.5 MHz → perioda 23.53 ns. Ovisi o ADC
+ * clocku, NE o fs — ostaje isti pri promjeni SAMPLE_RATE_HZ.                  */
 /* Svaki kanal = 24.5 (sampling) + 12.5 (conv) = 37 ciklusa = 870.6 ns       */
 #define CH_DELAY_S            870.6e-9f
 
@@ -34,44 +43,45 @@
 #define SPEED_OF_SOUND        343.0f    /* m/s pri ~20°C */
 
 /* ── Geometrija mikrofona ─────────────────────────────────────────────────────
- * Izmjerene pozicije fizičkog niza (vrijednosti u cm → m). M1 je u ishodištu
- * (referentni mikrofon za TDOA). Baza M1-M2-M3 je ~jednakostraničan trokut
- * (bridovi ~10 cm), M4 je vrh iznad baze.
+ * M1, M2, M3 čine JEDNAKOSTRANIČNI trokut sa stranicom a = 13 cm, u ravnini z=0.
+ * M1 je u ishodištu (referentni vrh). M2 i M3 su druga dva vrha, SIMETRIČNA oko
+ * X-osi (M2 na +Y = lijevo, M3 na −Y = desno), pa bisektrisa M2/M3 pada na +X.
  *
- *   M1 = ( 0.00,  0.00, 0.00) cm   RANK1, PB14
- *   M2 = ( 8.67,  5.00, 0.00) cm   RANK2, PC0
- *   M3 = ( 8.67, −5.00, 0.00) cm   RANK3, PC1
- *   M4 = ( 5.00,  0.00, 8.00) cm   RANK4, PC2   (vrh)
+ * Izvod (M1 u ishodištu, M2/M3 simetrični oko X):
+ *   |M2−M3| = 2·y = a            → y = a/2          = 0.065 m
+ *   |M1−M2| = sqrt(x² + y²) = a   → x = a·sqrt(3)/2  = 0.112583 m
  *
- * Azimut = atan2(y, x); elevacija = asin(z). Izlaz az_tenth ∈ [-1800,+1800]
- * tenths, tj. raspon [-180°, +180°] (NE 0-360°):
- *   +X →    0°  naprijed (bisektrisa između M2 i M3)
- *   +Y →  +90°  M2 strana (lijevo)
- *   −Y →  −90°  M3 strana (desno)
- *   −X → ±180°  M1 strana (nazad)
- *   +Z → elevacija +90°  gore (M4)
+ *   M1 = ( 0.000000,  0.000,  0.00) m   RANK1   referentni
+ *   M2 = ( 0.112583, +0.065,  0.00) m   RANK2   lijevo  (+Y)
+ *   M3 = ( 0.112583, −0.065,  0.00) m   RANK3   desno   (−Y)
+ *   M4 = ( 0.000000,  0.000,  0.08) m   RANK4   vrh (zasad se NE koristi)
  *
- * M_geom se računa iz ovih pozicija u LOC3D_Init() (runtime), pa promjena
- * koordinata automatski propagira — ništa drugo ne treba ručno mijenjati. */
-#define MIC1_X   0.0000f
-#define MIC1_Y   0.0000f
-#define MIC1_Z   0.0000f
+ * Azimut = atan2(y, x), wrap [0,360):
+ *   0°   → +X  (naprijed, bisektrisa M2/M3)
+ *   90°  → +Y  (lijevo, M2)
+ *   180° → −X  (nazad, M1 strana)
+ *   270° → −Y  (desno, M3)
+ * Elevacija: +Z → gore (M4) */
+#define MIC1_X   0.000000f
+#define MIC1_Y   0.000000f
+#define MIC1_Z   0.000000f
 
-#define MIC2_X   0.0867f   /*  8.67 cm */
-#define MIC2_Y   0.0500f   /*  5.00 cm */
-#define MIC2_Z   0.0000f
+#define MIC2_X   0.112583f  /* a·√3/2  (naprijed) */
+#define MIC2_Y   0.065000f  /* +a/2    (lijevo)   */
+#define MIC2_Z   0.000000f
 
-#define MIC3_X   0.0867f   /*  8.67 cm */
-#define MIC3_Y  (-0.0500f) /* −5.00 cm */
-#define MIC3_Z   0.0000f
+#define MIC3_X   0.112583f  /* a·√3/2  (naprijed) */
+#define MIC3_Y  (-0.065000f) /* −a/2   (desno)    */
+#define MIC3_Z   0.000000f
 
-#define MIC4_X   0.0500f   /*  5.00 cm */
-#define MIC4_Y   0.0000f
-#define MIC4_Z   0.0800f   /*  8.00 cm */
+#define MIC4_X   0.000000f  /* sredina */
+#define MIC4_Y   0.000000f
+#define MIC4_Z   0.080000f  /*  8.00 cm */
 
 /* ── TDOA ograničenje ─────────────────────────────────────────────────────────
- * Korelira se M1 vs M2/M3/M4; najveći baseline od M1 ≈ 10 cm (M1-M2, M1-M3).
- * 0.10/343 · 64000 = 18.66 uzoraka → 20. Povećaj ako proširiš niz. */
-#define TDOA_MAX_SAMPLES      20
+ * Korelira se M1 vs M2/M3/M4; najveći baseline od M1 = stranica a = 13 cm.
+ * 0.13/343 · 192000 = 72.8 uzoraka → 74. Skalira s fs — uskladi pri promjeni
+ * SAMPLE_RATE_HZ (≈ baseline/343 · fs). */
+#define TDOA_MAX_SAMPLES      74
 
 #endif /* AUDIO_COMMON_H */

@@ -1,5 +1,6 @@
 #include "uart_driver.h"
 #include "audio_common.h"
+#include <stdio.h>
 
 static inline void UART_SendByte(uint8_t byte)
 {
@@ -106,5 +107,38 @@ void UART_SendRawCapture(const uint16_t *ch0, const uint16_t *ch1,
     /* Završetak */
     UART_SendByte(0xCC);
     UART_SendByte(0xDD);
+    while (!LL_USART_IsActiveFlag_TC(UART4));
+}
+
+void UART_SendString(const char *str)
+{
+    if (!str) return;
+    while (*str) {
+        UART_SendByte((uint8_t)*str);
+        str++;
+    }
+}
+
+void UART_SendRawCaptureCSV(const uint16_t *ch0, const uint16_t *ch1,
+                            const uint16_t *ch2, const uint16_t *ch3)
+{
+    char line[48];
+
+    /* Zaglavlje — markeri RAW START / RAW END olakšavaju izrezivanje bloka
+     * iz logiranog teksta (npr. copy u MATLAB/Excel). */
+    UART_SendString("\r\nRAW START N=");
+    snprintf(line, sizeof(line), "%u\r\nidx,M1,M2,M3,M4\r\n",
+             (unsigned)SAMPLES_PER_CHANNEL);
+    UART_SendString(line);
+
+    for (uint16_t s = 0u; s < (uint16_t)SAMPLES_PER_CHANNEL; s++) {
+        snprintf(line, sizeof(line), "%u,%u,%u,%u,%u\r\n",
+                 (unsigned)s,
+                 (unsigned)ch0[s], (unsigned)ch1[s],
+                 (unsigned)ch2[s], (unsigned)ch3[s]);
+        UART_SendString(line);
+    }
+
+    UART_SendString("RAW END\r\n");
     while (!LL_USART_IsActiveFlag_TC(UART4));
 }

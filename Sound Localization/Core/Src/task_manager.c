@@ -3,11 +3,19 @@
 #include "uart_driver.h"
 #include "audio_common.h"
 #include "gcc_phat.h"
+#include "mpu9250.h"
+#include "cmsis_os.h"
 #include <string.h>
 
-/* Lokalizacijski mod biran u audio_common.h (USE_3MIC_LOC). Aliasi ispod čine
- * ostatak koda neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi. */
-#if USE_3MIC_LOC
+/* Lokalizacijski mod biran u audio_common.h. Aliasi ispod čine ostatak koda
+ * neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi.
+ * Prioritet: USE_4MIC_TIME_LOC > USE_3MIC_LOC > puna GCC 4-mic. */
+#if USE_4MIC_TIME_LOC
+  #include "sound_loc3d_4mic_time.h"
+  typedef loc3d_4mic_time_result_t loc_result_t;
+  #define LOC_INIT()            LOC3D_4MIC_TIME_Init()
+  #define LOC_PROCESS(b, r)     LOC3D_4MIC_TIME_Process((b), (r))
+#elif USE_3MIC_LOC
   #if USE_TIME_DOMAIN_LOC
     #include "loc3d_3mic_time.h"
     typedef loc3d_3mic_time_result_t loc_result_t;
@@ -33,6 +41,10 @@ typedef loc3d_result_t loc_result_t;
 osMessageQId  queueDmaEventHandle;
 QueueHandle_t queueSnapshotHandle;
 QueueHandle_t queueResultHandle;
+
+/* Štiti UART4 — i UART_Task (lokalizacija 0x03) i IMU_Task (orijentacija 0x05)
+ * šalju paralelno. Bez mutexa bi se bajtovi dvaju paketa izmiješali na žici. */
+static osMutexId uartMutexHandle;
 
 /* Trostruki snapshot buffer + FIFO queue indeksa (dubina ACQ_NUM_BUFFERS-1):
  * ACQ_Task rotira 0→1→2→0 i šalje indeks, FFT_Task ih troši redom (FIFO).
@@ -120,6 +132,7 @@ static void StartUARTTask(void const *argument)
 
     for (;;) {
         if (xQueueReceive(queueResultHandle, &r, portMAX_DELAY) == pdTRUE) {
+            osMutexWait(uartMutexHandle, osWaitForever);
             UART_SendAngle3DPacket(r.az_tenth, r.el_tenth, r.strength);
 
             /* Raw CSV ispis uzoraka prozora detekcije zasad je ISKLJUČEN. Sadržaj
@@ -129,10 +142,55 @@ static void StartUARTTask(void const *argument)
                 UART_SendRawCaptureCSV(dbg_raw_ch0, dbg_raw_ch1,
                                        dbg_raw_ch2, dbg_raw_ch3);
             } */
+            osMutexRelease(uartMutexHandle);
 
             /* Otpusti zamrzavanje — FFT_Task smije ponovno tražiti detekcije. */
             capture_ready = 0;
         }
+    }
+}
+
+/*
+ * IMU_Task — čita MPU-9250, fuzira orijentaciju (Mahony), šalje paket 0x05.
+ *
+ * Prioritet BelowNormal: ispod ACQ_Task (Realtime) i FFT_Task (High) — nikad ne
+ * ometa akviziciju ni lokalizaciju. Iznad UART_Task (Low) nije nužno; oba dijele
+ * UART preko uartMutexHandle.
+ *
+ * Petlja radi na ~100 Hz (osDelay 10 ms) radi glatke fuzije, ali UART paket
+ * šalje rjeđe (svakih ~5 iteracija ≈ 20 Hz) — orijentacija se ne mijenja brzo,
+ * a time ostavljamo UART propusnost lokalizaciji.
+ */
+static void StartIMUTask(void const *argument)
+{
+    mpu_orientation_t ori;
+    const float dt = 0.01f;       /* 100 Hz fuzija */
+    uint8_t send_div = 0;
+    uint8_t flags;
+
+    /* Ako MPU nije detektiran u main.c, MPU_Update vraća grešku — task tada
+     * samo mirno spava i ne šalje ništa (ploča radi bez IMU-a). */
+    flags = MPU_HasMag() ? 0x01u : 0x00u;
+
+    for (;;) {
+        if (MPU_Update(dt, &ori) == 0) {
+            if (++send_div >= 5u) {     /* ~20 Hz slanje */
+                send_div = 0;
+
+                int16_t roll_t  = (int16_t)(ori.roll_deg  * 10.0f);
+                int16_t pitch_t = (int16_t)(ori.pitch_deg * 10.0f);
+
+                /* Bez magnetometra (npr. MPU-6500) yaw nema apsolutnu referencu
+                 * i driftao bi. Šaljemo yaw=0 i flag=0 → ESP32 ga ignorira i
+                 * zakreće plohu samo po pitch/roll (stabilno iz gravitacije). */
+                int16_t yaw_t = flags ? (int16_t)(ori.yaw_deg * 10.0f) : 0;
+
+                osMutexWait(uartMutexHandle, osWaitForever);
+                UART_SendOrientationPacket(roll_t, pitch_t, yaw_t, flags);
+                osMutexRelease(uartMutexHandle);
+            }
+        }
+        osDelay(10);
     }
 }
 
@@ -148,12 +206,19 @@ void app_tasks_init(void)
     queueSnapshotHandle = xQueueCreate(ACQ_NUM_BUFFERS - 1, sizeof(uint8_t));
     queueResultHandle   = xQueueCreate(4, sizeof(loc_result_t));
 
-    osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime, 0, 256);
+    osMutexDef(uartMutex);
+    uartMutexHandle = osMutexCreate(osMutex(uartMutex));
+
+    osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime,    0, 256);
     (void)osThreadCreate(osThread(ACQ_Task),  NULL);
 
-    osThreadDef(FFT_Task,  StartFFTTask,  osPriorityHigh,     0, 1024);
+    osThreadDef(FFT_Task,  StartFFTTask,  osPriorityHigh,        0, 1024);
     (void)osThreadCreate(osThread(FFT_Task),  NULL);
 
-    osThreadDef(UART_Task, StartUARTTask, osPriorityLow,      0, 256);
+    osThreadDef(UART_Task, StartUARTTask, osPriorityLow,         0, 256);
     (void)osThreadCreate(osThread(UART_Task), NULL);
+
+    /* IMU_Task — float fuzija (Mahony) traži FPU kontekst → 512 words stacka. */
+    osThreadDef(IMU_Task,  StartIMUTask,  osPriorityBelowNormal, 0, 512);
+    (void)osThreadCreate(osThread(IMU_Task),  NULL);
 }

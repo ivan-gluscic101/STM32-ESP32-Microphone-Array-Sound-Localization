@@ -13,7 +13,14 @@
  *     alocira ~68 KB tablica u BSS. 0 = pravi ADC podaci (mock se ne kompajlira). */
 #define USE_MOCK_ADC          0
 
-/* ── Lokalizacijski mod ────────────────────────────────────────────────────────
+/* ── 4-mic time-domain (PUN 3D) ────────────────────────────────────────────────
+ * 1 = puna 4-mikrofonska TIME-domain lokalizacija (sound_loc3d_4mic_time.c).
+ *     Koristi sva 4 mikrofona (pravilan tetraedar) → pravi predznak elevacije,
+ *     bez pretpostavke z >= 0. IMA PRIORITET nad USE_3MIC_LOC kad je 1.
+ * 0 = koristi izbor ispod (USE_3MIC_LOC / USE_TIME_DOMAIN_LOC). */
+#define USE_4MIC_TIME_LOC     0
+
+/* ── Lokalizacijski mod (kad je USE_4MIC_TIME_LOC = 0) ─────────────────────────
  * 1 = 3-mikrofonska lokalizacija (M1,M2,M3; M4 se uzorkuje ali se NE koristi).
  *     Koristi loc3d_3mic.c — elevacija uz pretpostavku z >= 0. Uključi dok je
  *     4. mikrofon (RANK4, PC2) neispravan.
@@ -51,10 +58,15 @@
  *   |M2−M3| = 2·y = a            → y = a/2          = 0.065 m
  *   |M1−M2| = sqrt(x² + y²) = a   → x = a·sqrt(3)/2  = 0.112583 m
  *
- *   M1 = ( 0.000000,  0.000,  0.00) m   RANK1   referentni
- *   M2 = ( 0.112583, +0.065,  0.00) m   RANK2   lijevo  (+Y)
- *   M3 = ( 0.112583, −0.065,  0.00) m   RANK3   desno   (−Y)
- *   M4 = ( 0.000000,  0.000,  0.08) m   RANK4   vrh (zasad se NE koristi)
+ *   M1 = ( 0.000000,  0.000000,  0.000000) m   RANK1   referentni
+ *   M2 = ( 0.112583, +0.065000,  0.000000) m   RANK2   lijevo  (+Y)
+ *   M3 = ( 0.112583, −0.065000,  0.000000) m   RANK3   desno   (−Y)
+ *   M4 = ( 0.075055,  0.000000,  0.106145) m   RANK4   vrh tetraedra
+ *
+ * PRAVILAN TETRAEDAR: sva 4 mikrofona međusobno udaljena a = 13 cm.
+ *   M4 leži iznad CENTROIDA baze (cx = (0+0.112583+0.112583)/3 = 0.075055,
+ *   cy = 0) na visini h = a·√(2/3) = 0.13·0.816497 = 0.106145 m (10.61 cm).
+ *   Provjera: |M1−M4| = |M2−M4| = |M3−M4| = 0.13 m. ✓
  *
  * Azimut = atan2(y, x), wrap [0,360):
  *   0°   → +X  (naprijed, bisektrisa M2/M3)
@@ -74,12 +86,13 @@
 #define MIC3_Y  (-0.065000f) /* −a/2   (desno)    */
 #define MIC3_Z   0.000000f
 
-#define MIC4_X   0.000000f  /* sredina */
-#define MIC4_Y   0.000000f
-#define MIC4_Z   0.080000f  /*  8.00 cm */
+#define MIC4_X   0.075055f  /* centroid baze X (a/√3) */
+#define MIC4_Y   0.000000f  /* centroid baze Y        */
+#define MIC4_Z   0.106145f  /* h = a·√(2/3) = 10.61 cm (vrh tetraedra) */
 
 /* ── TDOA ograničenje ─────────────────────────────────────────────────────────
- * Korelira se M1 vs M2/M3/M4; najveći baseline od M1 = stranica a = 13 cm.
+ * Korelira se M1 vs M2/M3/M4; u pravilnom tetraedru su SVI bridovi (uklj. M1-M4)
+ * jednaki = a = 13 cm, pa je najveći baseline od M1 i dalje 13 cm.
  * 0.13/343 · 192000 = 72.8 uzoraka → 74. Skalira s fs — uskladi pri promjeni
  * SAMPLE_RATE_HZ (≈ baseline/343 · fs). */
 #define TDOA_MAX_SAMPLES      74

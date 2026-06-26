@@ -83,6 +83,24 @@ void UART_SendAngle3DPacket(int16_t az_tenth, int16_t el_tenth, uint8_t strength
     while (!LL_USART_IsActiveFlag_TC(UART4));
 }
 
+void UART_SendOrientationPacket(int16_t roll_tenth, int16_t pitch_tenth,
+                                int16_t yaw_tenth, uint8_t flags)
+{
+    UART_SendByte(0xAA);
+    UART_SendByte(0xBB);
+    UART_SendByte(0x05);
+    UART_SendByte((uint8_t)(roll_tenth  >> 8));
+    UART_SendByte((uint8_t)(roll_tenth  & 0xFF));
+    UART_SendByte((uint8_t)(pitch_tenth >> 8));
+    UART_SendByte((uint8_t)(pitch_tenth & 0xFF));
+    UART_SendByte((uint8_t)(yaw_tenth   >> 8));
+    UART_SendByte((uint8_t)(yaw_tenth   & 0xFF));
+    UART_SendByte(flags);
+    UART_SendByte(0xCC);
+    UART_SendByte(0xDD);
+    while (!LL_USART_IsActiveFlag_TC(UART4));
+}
+
 void UART_SendRawCapture(const uint16_t *ch0, const uint16_t *ch1,
                          const uint16_t *ch2, const uint16_t *ch3)
 {

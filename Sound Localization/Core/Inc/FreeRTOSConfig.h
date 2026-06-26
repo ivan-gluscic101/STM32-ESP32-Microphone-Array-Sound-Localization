@@ -13,15 +13,16 @@
  *      i drugi task dotakne float, FPU registri se pokvare.
  *      S configENABLE_FPU=1, lazy stacking čuva FPU kontekst samo kad treba.
  *
- *   2. configTOTAL_HEAP_SIZE: 12288 → 20480 (20 KB)
- *      Novi raspored:
+ *   2. configTOTAL_HEAP_SIZE: 12288 → 24576 (24 KB)
+ *      Raspored:
  *        - ACQ_Task stack:    256 words × 4 =  1024 B
- *        - FFT_Task stack:    512 words × 4 =  2048 B
+ *        - FFT_Task stack:   1024 words × 4 =  4096 B
  *        - UART_Task stack:   256 words × 4 =  1024 B
- *        - 3 queue-a + overhead:               ~600 B
- *        - Ukupno RTOS:                       ~4.7 KB
+ *        - IMU_Task stack:    512 words × 4 =  2048 B  (Mahony float fuzija)
+ *        - 3 queue-a + UART mutex + overhead:  ~800 B
+ *        - Ukupno RTOS:                       ~9 KB
  *        - Slobodno za buduće taskove:        ~15 KB
- *      STM32G474RE ima 128 KB RAM-a, 20 KB heap je samo 15.6%.
+ *      STM32G474RE ima 128 KB RAM-a, 24 KB heap je samo 18.75%.
  *
  *   3. configUSE_TIME_SLICING eksplicitno postavljeno na 1
  *      Originalno nije bilo definirano (koristio se default=1).

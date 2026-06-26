@@ -13,9 +13,11 @@
  * ovdje se koristi SAMO za 3D vizualizaciju u web pregledniku (crtanje
  * mikrofona), ne za izračun — STM32 računa azimut/elevaciju.
  *
- * M1, M2, M3 = jednakostranični trokut, stranica 13 cm, u ravnini z=0.
- * M1 u ishodištu; M2/M3 simetrični oko X-osi (M2 +Y lijevo, M3 −Y desno),
- * bisektrisa M2/M3 pada na +X. M4 je vrh iznad baze (zasad se ne koristi).
+ * PRAVILAN TETRAEDAR, brid 13 cm. M1, M2, M3 = jednakostranični trokut u
+ * ravnini z=0; M1 u ishodištu; M2/M3 simetrični oko X-osi (M2 +Y lijevo,
+ * M3 −Y desno), bisektrisa M2/M3 pada na +X. M4 je vrh tetraedra iznad
+ * CENTROIDA baze, na visini h = a·√(2/3) = 10.6145 cm.
+ *   Provjera: |M1−M4| = |M2−M4| = |M3−M4| = 13 cm.
  *
  * Koordinatni sustav:
  *   +X → 0°  naprijed (bisektrisa M2/M3)
@@ -37,12 +39,13 @@ typedef struct {
 } microphone_t;
 
 /* Matrica lokacija mikrofona — usklađena s audio_common.h (cm = m × 100).
- * Jednakostranični trokut a=13cm: x = a·√3/2 = 11.2583, y = a/2 = 6.5 cm. */
+ * Pravilan tetraedar a=13cm: baza x = a·√3/2 = 11.2583, y = a/2 = 6.5 cm;
+ * M4 iznad centroida (cx = a/√3 = 7.5055) na visini h = a·√(2/3) = 10.6145 cm. */
 static const microphone_t microphones[NUM_MICROPHONES] = {
-    { .x =  0.0000f, .y =  0.00f, .z = 0.00f, .name = "M1" },  /* referentni */
-    { .x = 11.2583f, .y =  6.50f, .z = 0.00f, .name = "M2" },  /* lijevo (+Y) */
-    { .x = 11.2583f, .y = -6.50f, .z = 0.00f, .name = "M3" },  /* desno (−Y) */
-    { .x =  0.0000f, .y =  0.00f, .z = 8.00f, .name = "M4" }   /* vrh */
+    { .x =  0.0000f, .y =  0.00f, .z =  0.0000f, .name = "M1" },  /* referentni */
+    { .x = 11.2583f, .y =  6.50f, .z =  0.0000f, .name = "M2" },  /* lijevo (+Y) */
+    { .x = 11.2583f, .y = -6.50f, .z =  0.0000f, .name = "M3" },  /* desno (−Y) */
+    { .x =  7.5055f, .y =  0.00f, .z = 10.6145f, .name = "M4" }   /* vrh tetraedra */
 };
 
 /**

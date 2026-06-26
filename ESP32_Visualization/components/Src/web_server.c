@@ -40,6 +40,7 @@ static const char *INDEX_HTML =
 "padding:3px 6px;border-radius:3px;pointer-events:none;border:1px solid #f44;}"
 "</style></head><body>"
 "<div id='hud'>Azimuth: --&deg; | Elevation: --&deg; | Strength: --</div>"
+"<div id='ori-hud' style='position:fixed;top:44px;left:12px;color:#9cf;font:13px/1.5 monospace;background:rgba(0,0,0,.6);padding:6px 12px;border-radius:6px;pointer-events:none;'>Roll: --&deg; | Pitch: --&deg; | Yaw: --&deg;</div>"
 "<div id='sts'>Connecting...</div>"
 "<div id='mic-info'>Mikrofoni:<br></div>"
 "<div id='mic-labels'></div>"
@@ -90,7 +91,14 @@ static const char *INDEX_HTML =
 "return new Float32Array([1,0,0,0,0,c,s,0,0,-s,c,0,0,0,0,1]);}"
 "function rmY(a){var c=Math.cos(a),s=Math.sin(a);"
 "return new Float32Array([c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]);}"
+"function rmZ(a){var c=Math.cos(a),s=Math.sin(a);"
+"return new Float32Array([c,s,0,0,-s,c,0,0,0,0,1,0,0,0,0,1]);}"
 "var ID=new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);"
+
+/* Orijentacija plohe (radijani) — iz IMU 0x05 paketa. Model matrica ploče
+ * = Rz(yaw)·Ry(pitch)·Rx(roll), ista ZYX konvencija kao Mahony na STM32. */
+"var gRoll=0,gPitch=0,gYaw=0;"
+"function boardM(){return mm(rmZ(gYaw),mm(rmY(gPitch),rmX(gRoll)));}"
 
 /* --- Geometry: box (36 vrhova, samo pos) --- */
 "function boxGeo(){"
@@ -195,10 +203,11 @@ static const char *INDEX_HTML =
 "function updateMicrophoneLabels(){"
 "if(!microphones.length)return;"
 "var labels=labelContainer.querySelectorAll('.mic-label');"
+"var BM=boardM();"
 "for(var m=0;m<microphones.length;m++){"
 "var mx=microphones[m].x/10,my=microphones[m].y/10,mz=microphones[m].z/10;"
-"var p=new Float32Array(4);p[0]=mx;p[1]=my;p[2]=mz;p[3]=1;"
-"var vp=mm(VP,new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,mx,my,mz,1]));"
+/* Pozicija mikrofona u rotiranom okviru ploče (BM·translacija) */
+"var vp=mm(VP,mm(BM,new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,mx,my,mz,1])));"
 "var sx=vp[12]/vp[15],sy=vp[13]/vp[15],sz=vp[14]/vp[15];"
 "var x=(sx+1)*cv.width/2,y=(-sy+1)*cv.height/2;"
 "if(labels[m]){labels[m].style.left=Math.round(x)+'px';labels[m].style.top=Math.round(y)+'px';}"
@@ -213,14 +222,24 @@ static const char *INDEX_HTML =
 
 /* --- WebSocket --- */
 "var hud=document.getElementById('hud'),sts=document.getElementById('sts');"
+"var oriHud=document.getElementById('ori-hud');"
 "var ws=new WebSocket('ws://'+location.host+'/ws');"
 "ws.onopen=function(){sts.textContent='Connected';sts.style.color='#0f0';};"
 "ws.onerror=function(){sts.textContent='Error';sts.style.color='#ff6';};"
 "ws.onclose=function(e){sts.textContent='Disconnected ('+e.code+')';sts.style.color='#f44';};"
 "ws.onmessage=function(ev){"
 "try{var d=JSON.parse(ev.data);"
+"if(d.type==='orient'){"
+/* Orijentacija plohe: spremi kuteve (°→rad). Bez magnetometra yaw ostaje 0
+ * (drift bi bio besmislen) — zakreće se samo po pitch/roll iz gravitacije. */
+"gRoll=d.roll*Math.PI/180;gPitch=d.pitch*Math.PI/180;"
+"gYaw=d.mag?(d.yaw*Math.PI/180):0;"
+"oriHud.innerHTML='Roll: '+d.roll.toFixed(1)+'&deg; | Pitch: '+d.pitch.toFixed(1)+'&deg; | Yaw: '+(d.mag?d.yaw.toFixed(1)+'&deg;':'— (no compass)');"
+"}else{"
+/* Smjer zvuka (lokalni okvir ploče). */
 "hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; | Elevation: '+(d.polar||0).toFixed(1)+'&deg; | Strength: '+d.strength;"
-"addS(d.azimuth,d.polar||0);}catch(e){}};"
+"addS(d.azimuth,d.polar||0);"
+"}}catch(e){}};"
 
 /* --- Render loop --- */
 "gl.enable(gl.DEPTH_TEST);"
@@ -238,10 +257,13 @@ static const char *INDEX_HTML =
 "VP=mm(pm(60,cv.width/cv.height,.1,300),lm(ex,ey,ez));"
 /* Opaque: head box + zvučne sfere */
 // "drw(bBox,ID,[0,.67,1,1]);"
-/* Iscrtaj mikrofone kao male kuglice (crvene) */
+/* Model matrica ploče (rotacija iz IMU-a) — sve što je "na ploči" ide kroz nju:
+ * mikrofoni, zvučne sfere i 3 referentne ravnine zakreću se zajedno. */
+"var BM=boardM();"
+/* Iscrtaj mikrofone kao male kuglice (crvene), u rotiranom okviru ploče */
 "for(var m=0;m<microphones.length;m++){"
 "var mx=microphones[m].x/10,my=microphones[m].y/10,mz=microphones[m].z/10;"
-"drw(bSph,mm(tm(mx,my,mz),sm(.3)),[1,.2,.2,1]);"
+"drw(bSph,mm(BM,mm(tm(mx,my,mz),sm(.3))),[1,.2,.2,1]);"
 "}"
 "updateMicrophoneLabels();"
 "var now=Date.now();"
@@ -249,12 +271,13 @@ static const char *INDEX_HTML =
 "var age=now-pool[i].t;"
 "if(age>5000){pool.splice(i,1);continue;}"
 "var f=1-age/5000;"
-"drw(bSph,mm(tm(pool[i].x,pool[i].y,pool[i].z),sm(.5)),[f,.13*f,0,1]);}"
-/* Prozirne ravnine: XY (z=0), XZ (y=0), YZ (x=0) — depth write off da se ne kriju međusobno */
+/* Zvuk je u lokalnom okviru ploče → BM ga zakreće u svjetski okvir */
+"drw(bSph,mm(BM,mm(tm(pool[i].x,pool[i].y,pool[i].z),sm(.5))),[f,.13*f,0,1]);}"
+/* Prozirne ravnine: XY (z=0), XZ (y=0), YZ (x=0) — zakrenute s pločom */
 "gl.depthMask(false);"
-"drw(bQuad,ID,[1,.35,.35,.12]);"             /* XY ravnina (z=0) — CRVENA */
-"drw(bQuad,rmY(HP),[.35,1,.35,.12]);"        /* XZ ravnina (y=0) — ZELENA */
-"drw(bQuad,rmX(HP),[.35,.55,1,.12]);"        /* YZ ravnina (x=0) — PLAVA */
+"drw(bQuad,BM,[1,.35,.35,.12]);"                  /* XY ravnina (z=0) — CRVENA */
+"drw(bQuad,mm(BM,rmY(HP)),[.35,1,.35,.12]);"      /* XZ ravnina (y=0) — ZELENA */
+"drw(bQuad,mm(BM,rmX(HP)),[.35,.55,1,.12]);"      /* YZ ravnina (x=0) — PLAVA */
 "gl.depthMask(true);"
 "}"
 "render();"
@@ -356,13 +379,9 @@ static esp_err_t ws_handler(httpd_req_t *req) {
 /* ------------------------------------------------------------------ */
 /*  Slanje podataka svim WS klijentima                                 */
 /* ------------------------------------------------------------------ */
-void web_server_send_data(float azimuth, float polar, uint8_t strength) {
+/* Broadcast nul-terminiranog JSON stringa svim WS klijentima (thread-safe). */
+static void ws_broadcast_json(const char *json) {
     if (!server || !ws_fds_mutex) return;
-
-    char json[80];
-    snprintf(json, sizeof(json),
-             "{\"azimuth\":%.1f,\"polar\":%.1f,\"strength\":%u}",
-             azimuth, polar, strength);
 
     httpd_ws_frame_t ws_pkt = {
         .final      = true,
@@ -407,6 +426,22 @@ void web_server_send_data(float azimuth, float polar, uint8_t strength) {
         }
         xSemaphoreGive(ws_fds_mutex);
     }
+}
+
+void web_server_send_data(float azimuth, float polar, uint8_t strength) {
+    char json[96];
+    snprintf(json, sizeof(json),
+             "{\"type\":\"sound\",\"azimuth\":%.1f,\"polar\":%.1f,\"strength\":%u}",
+             azimuth, polar, strength);
+    ws_broadcast_json(json);
+}
+
+void web_server_send_orientation(float roll, float pitch, float yaw, uint8_t mag_valid) {
+    char json[96];
+    snprintf(json, sizeof(json),
+             "{\"type\":\"orient\",\"roll\":%.1f,\"pitch\":%.1f,\"yaw\":%.1f,\"mag\":%u}",
+             roll, pitch, yaw, mag_valid);
+    ws_broadcast_json(json);
 }
 
 /* ------------------------------------------------------------------ */

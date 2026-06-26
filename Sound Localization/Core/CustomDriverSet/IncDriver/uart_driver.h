@@ -18,6 +18,19 @@ void UART_SendAnglePacket(int16_t phi_tenth_deg, uint8_t strength);
 void UART_SendAngle3DPacket(int16_t az_tenth, int16_t el_tenth, uint8_t strength);
 
 /*
+ * UART_SendOrientationPacket — šalje orijentaciju plohe (IMU) na ESP32.
+ * Tip 0x05 (različit od 0x03 lokalizacije!) → ESP32 raspoznaje izvor podataka.
+ *
+ * Format: [0xAA][0xBB][0x05][RL_H][RL_L][PT_H][PT_L][YW_H][YW_L][FLAGS][0xCC][0xDD]
+ *   RL = roll u 0.1°, big-endian int16  (-1800..+1800)
+ *   PT = pitch u 0.1°, big-endian int16 (-900..+900)
+ *   YW = yaw u 0.1°, big-endian int16   (0..3600; bez magnetometra: relativan/drift)
+ *   FLAGS bit0 = magnetometar valjan (1) / yaw samo iz žira (0)
+ */
+void UART_SendOrientationPacket(int16_t roll_tenth, int16_t pitch_tenth,
+                                int16_t yaw_tenth, uint8_t flags);
+
+/*
  * UART_SendRawCapture — pošalji sirove (deinterleaveane, poravnate) uzorke sva
  * 4 kanala na ESP32 kao binarni okvir (tip 0x04), nakon detekcije. Blocking.
  *

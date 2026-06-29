@@ -13,24 +13,21 @@
  *     alocira ~68 KB tablica u BSS. 0 = pravi ADC podaci (mock se ne kompajlira). */
 #define USE_MOCK_ADC          0
 
-/* ── 4-mic time-domain (PUN 3D) ────────────────────────────────────────────────
+/* ── Lokalizacijski mod ────────────────────────────────────────────────────────
+ * Sve verzije rade TIME-domain onset TDOA (prag na amplitudi po kanalu, TDOA iz
+ * razmaka onseta). FFT/GCC-PHAT verzije su uklonjene iz projekta.
+ *
  * 1 = puna 4-mikrofonska TIME-domain lokalizacija (sound_loc3d_4mic_time.c).
  *     Koristi sva 4 mikrofona (pravilan tetraedar) → pravi predznak elevacije,
- *     bez pretpostavke z >= 0. IMA PRIORITET nad USE_3MIC_LOC kad je 1.
- * 0 = koristi izbor ispod (USE_3MIC_LOC / USE_TIME_DOMAIN_LOC). */
+ *     bez pretpostavke z >= 0.
+ * 0 = 3-mikrofonska TIME-domain lokalizacija (loc3d_3mic_time.c): M1,M2,M3;
+ *     M4 se uzorkuje ali se NE koristi. Elevacija uz pretpostavku z >= 0.
+ *     Koristi dok je 4. mikrofon (RANK4, PC2) neispravan. */
 #define USE_4MIC_TIME_LOC     0
 
-/* ── Lokalizacijski mod (kad je USE_4MIC_TIME_LOC = 0) ─────────────────────────
- * 1 = 3-mikrofonska lokalizacija (M1,M2,M3; M4 se uzorkuje ali se NE koristi).
- *     Koristi loc3d_3mic.c — elevacija uz pretpostavku z >= 0. Uključi dok je
- *     4. mikrofon (RANK4, PC2) neispravan.
- * 0 = puna 4-mikrofonska 3D lokalizacija (sound_loc_3d.c). */
-#define USE_3MIC_LOC          1
-
-/* ── Metoda TDOA (samo kad je USE_3MIC_LOC = 1) ───────────────────────────────
- * 0 = GCC-PHAT u frekvencijskoj domeni (loc3d_3mic.c) — robusno, FFT-bazirano.
- * 1 = TIME-domain onset TDOA (loc3d_3mic_time.c) — ukloni DC, traži trenutak
- *     dolaska (prag na amplitudi) po kanalu, TDOA iz razmaka onseta. Bez FFT-a. */
+/* Zadržano radi kompatibilnosti konfiguracije: jedina podržana vrijednost je 1
+ * (frekvencijska/GCC-PHAT domena više ne postoji). task_manager.c će prijaviti
+ * #error ako je postavljeno na 0. */
 #define USE_TIME_DOMAIN_LOC   1
 
 /* ── Vremenski parametri ───────────────────────────────────────────────────── */

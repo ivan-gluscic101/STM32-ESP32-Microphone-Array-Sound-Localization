@@ -1,5 +1,5 @@
 #include "sound_loc3d_4mic_time.h"
-#include "gcc_phat.h"   /* samo za GCC_SnapshotRaw (memcpy raw uzoraka za UART debug) */
+#include "raw_capture.h"   /* RawCapture_Snapshot (memcpy raw uzoraka za UART debug) */
 #include <math.h>
 
 /*
@@ -56,7 +56,7 @@ static uint16_t s_cooldown = 0;
  * Smjer propagacije u = M_geom·tau; smjer PREMA izvoru s = −u (korak 6). */
 static float M_geom[3][3];
 
-/* Analitička inverzija 3×3 (adjugate / determinanta) — kao u sound_loc_3d.c. */
+/* Analitička inverzija 3×3 (adjugate / determinanta). */
 static void invert3x3(const float m[3][3], float inv[3][3])
 {
     float det =
@@ -146,7 +146,7 @@ uint8_t LOC3D_4MIC_TIME_Process(const uint16_t *buf, loc3d_4mic_time_result_t *o
         if (snap_off + SAMPLES_PER_CHANNEL > WIN_FRAMES) {
             snap_off = WIN_FRAMES - SAMPLES_PER_CHANNEL;
         }
-        GCC_SnapshotRaw(buf, snap_off);
+        RawCapture_Snapshot(buf, snap_off);
     }
 
     /* 4. TDOA za geometriju — uvijek relativno na M1 (uzorci → sekunde).

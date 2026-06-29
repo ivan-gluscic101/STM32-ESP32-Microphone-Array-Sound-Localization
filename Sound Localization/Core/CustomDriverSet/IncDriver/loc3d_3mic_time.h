@@ -12,8 +12,8 @@
  *   3. TDOA za geometriju je uvijek relativan na M1:
  *      tau12 = (onset_M2 − onset_M1) · Ts,  tau13 = (onset_M3 − onset_M1) · Ts.
  *      Korigira se ADC sekvencijalni offset (CH_DELAY_S po kanalu) kao i drugdje.
- *   4. Smjer u ravnini: [sx; sy] = −M_geom2 · [tau12; tau13]  (isti M_geom2 kao
- *      u loc3d_3mic.c — geometrija/predznaci identični). Elevacija sz uz z >= 0.
+ *   4. Smjer u ravnini: [sx; sy] = −M_geom2 · [tau12; tau13]  (M_geom2 = c·inv(D2)
+ *      iz pozicija M1/M2/M3). Elevacija sz uz pretpostavku z >= 0.
  *   5. Azimut = atan2(sy, sx) wrap [0,360);  Elevacija = asin(sz) ∈ [0,+90].
  *
  * DC_LEVEL i THRESHOLD_LEVEL su #define u loc3d_3mic_time.c (lako podesivi).

@@ -16,7 +16,7 @@
  *   2. configTOTAL_HEAP_SIZE: 12288 → 24576 (24 KB)
  *      Raspored:
  *        - ACQ_Task stack:    256 words × 4 =  1024 B
- *        - FFT_Task stack:   1024 words × 4 =  4096 B
+ *        - LOC_Task stack:   1024 words × 4 =  4096 B
  *        - UART_Task stack:   256 words × 4 =  1024 B
  *        - IMU_Task stack:    512 words × 4 =  2048 B  (Mahony float fuzija)
  *        - 3 queue-a + UART mutex + overhead:  ~800 B

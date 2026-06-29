@@ -1,5 +1,5 @@
 #include "loc3d_3mic_time.h"
-#include "gcc_phat.h"   /* samo za GCC_SnapshotRaw (memcpy raw uzoraka za UART debug) */
+#include "raw_capture.h"   /* RawCapture_Snapshot (memcpy raw uzoraka za UART debug) */
 #include <math.h>
 
 /*
@@ -11,9 +11,9 @@
  *     bilježimo PRVI uzorak u kojem okine. ref_mic = onaj koji okine prvi.
  *   - Razlika onset indeksa između kanala = TDOA (u uzorcima). Iz toga smjer.
  *
- * Geometrija/predznaci identični loc3d_3mic.c: TDOA se za geometriju uvijek
- * formira relativno na M1 (tau12 = onset_M2 − onset_M1, tau13 = onset_M3 − onset_M1),
- * neovisno o tome koji je kanal fizički okinuo prvi.
+ * TDOA se za geometriju uvijek formira relativno na M1 (tau12 = onset_M2 −
+ * onset_M1, tau13 = onset_M3 − onset_M1), neovisno o tome koji je kanal fizički
+ * okinuo prvi.
  *
  * Debug snapshot (dbgt_*) — čita se u debuggeru, ne ide na UART.
  */
@@ -47,7 +47,7 @@ volatile float    dbgt_sx, dbgt_sy, dbgt_sz;
 
 static uint16_t s_cooldown = 0;
 
-/* Geometrija — isto kao loc3d_3mic.c. M_geom2 = c·inv(D2). */
+/* Geometrija: M_geom2 = c·inv(D2) (D2 = baseline vektori M2−M1, M3−M1). */
 static float M_geom2[2][2];
 
 static void invert2x2(const float m[2][2], float inv[2][2])
@@ -130,7 +130,7 @@ uint8_t LOC3D_3MIC_TIME_Process(const uint16_t *buf, loc3d_3mic_time_result_t *o
         if (snap_off + SAMPLES_PER_CHANNEL > WIN_FRAMES) {
             snap_off = WIN_FRAMES - SAMPLES_PER_CHANNEL;
         }
-        GCC_SnapshotRaw(buf, snap_off);
+        RawCapture_Snapshot(buf, snap_off);
     }
 
     /* 4. TDOA za geometriju — uvijek relativno na M1 (uzorci → sekunde).

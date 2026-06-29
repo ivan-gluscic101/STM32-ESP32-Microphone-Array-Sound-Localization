@@ -2,36 +2,30 @@
 #include "adc_driver.h"
 #include "uart_driver.h"
 #include "audio_common.h"
-#include "gcc_phat.h"
+#include "raw_capture.h"
 #include "mpu9250.h"
 #include "cmsis_os.h"
 #include <string.h>
 
 /* Lokalizacijski mod biran u audio_common.h. Aliasi ispod čine ostatak koda
  * neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi.
- * Prioritet: USE_4MIC_TIME_LOC > USE_3MIC_LOC > puna GCC 4-mic. */
+ * Prioritet: USE_4MIC_TIME_LOC > 3-mic time-domain (default).
+ * FFT/GCC-PHAT verzije (sound_loc_3d, loc3d_3mic) su uklonjene — sve su
+ * time-domain (TDOA pragom). USE_TIME_DOMAIN_LOC se zadržava radi kompatibilnosti
+ * konfiguracije, ali je jedina podržana vrijednost 1. */
 #if USE_4MIC_TIME_LOC
   #include "sound_loc3d_4mic_time.h"
   typedef loc3d_4mic_time_result_t loc_result_t;
   #define LOC_INIT()            LOC3D_4MIC_TIME_Init()
   #define LOC_PROCESS(b, r)     LOC3D_4MIC_TIME_Process((b), (r))
-#elif USE_3MIC_LOC
-  #if USE_TIME_DOMAIN_LOC
-    #include "loc3d_3mic_time.h"
-    typedef loc3d_3mic_time_result_t loc_result_t;
-    #define LOC_INIT()            LOC3D_3MIC_TIME_Init()
-    #define LOC_PROCESS(b, r)     LOC3D_3MIC_TIME_Process((b), (r))
-  #else
-    #include "loc3d_3mic.h"
-    typedef loc3d_3mic_result_t loc_result_t;
-    #define LOC_INIT()            LOC3D_3MIC_Init()
-    #define LOC_PROCESS(b, r)     LOC3D_3MIC_Process((b), (r))
-  #endif
 #else
-#include "sound_loc_3d.h"
-typedef loc3d_result_t loc_result_t;
-#define LOC_INIT()            LOC3D_Init()
-#define LOC_PROCESS(b, r)     LOC3D_Process((b), (r))
+  #if defined(USE_TIME_DOMAIN_LOC) && !USE_TIME_DOMAIN_LOC
+    #error "FFT/GCC-PHAT lokalizacija je uklonjena. Postavi USE_TIME_DOMAIN_LOC=1 ili USE_4MIC_TIME_LOC=1."
+  #endif
+  #include "loc3d_3mic_time.h"
+  typedef loc3d_3mic_time_result_t loc_result_t;
+  #define LOC_INIT()            LOC3D_3MIC_TIME_Init()
+  #define LOC_PROCESS(b, r)     LOC3D_3MIC_TIME_Process((b), (r))
 #endif
 
 /* USE_MOCK_ADC je definiran u audio_common.h (dijeli ga mock_adc.c radi
@@ -47,21 +41,21 @@ QueueHandle_t queueResultHandle;
 static osMutexId uartMutexHandle;
 
 /* Trostruki snapshot buffer + FIFO queue indeksa (dubina ACQ_NUM_BUFFERS-1):
- * ACQ_Task rotira 0→1→2→0 i šalje indeks, FFT_Task ih troši redom (FIFO).
+ * ACQ_Task rotira 0→1→2→0 i šalje indeks, LOC_Task ih troši redom (FIFO).
  * Queue dubine N-1 + 1 koji se trenutno čita = max N "zauzetih" buffera, pa
  * ACQ nikad ne prepisuje buffer koji je u queue-u ili se čita (vidi guard dolje).
  * 3 × HALF_BUFFER × 2 B = 3 × 8 KB = 24 KB u BSS-u. */
 static uint16_t acq_snapshot[ACQ_NUM_BUFFERS][HALF_BUFFER];
 
 /* Sliding window: drži [prethodni half | trenutni half] = 2 × HALF_BUFFER uzoraka.
- * Vlasništvo: isključivo FFT_Task — nema concurrency problema.
+ * Vlasništvo: isključivo LOC_Task — nema concurrency problema.
  * 2 × HALF_BUFFER × 2 B = 16 KB u BSS-u. */
 static uint16_t sliding_buf[2 * HALF_BUFFER];
 
-/* Raw CSV se šalje IZRAVNO iz dbg_raw_chX (gcc_phat.c). capture_ready zamrzava
+/* Raw CSV se šalje IZRAVNO iz dbg_raw_chX (raw_capture.c). capture_ready zamrzava
  * obradu između detekcije i kraja UART slanja (CSV ~2 s @115200): dok je
- * postavljen, FFT_Task ne zove LOC_PROCESS pa GCC_SnapshotRaw ne prepisuje
- * dbg_raw_chX koji UART_Task upravo ispisuje. Producer: FFT_Task. Consumer: UART_Task. */
+ * postavljen, LOC_Task ne zove LOC_PROCESS pa RawCapture_Snapshot ne prepisuje
+ * dbg_raw_chX koji UART_Task upravo ispisuje. Producer: LOC_Task. Consumer: UART_Task. */
 static volatile uint8_t capture_ready = 0;
 
 /* ── Task implementacije ─────────────────────────────────────────────────── */
@@ -74,9 +68,9 @@ static void StartACQTask(void const *argument)
         osEvent evt = osMessageGet(queueDmaEventHandle, osWaitForever);
         if (evt.status != osEventMessage) { continue; }
 
-        /* Ako FFT_Task zaostaje i queue je pun, preskoči ovaj event umjesto da
+        /* Ako LOC_Task zaostaje i queue je pun, preskoči ovaj event umjesto da
          * prepišemo acq_snapshot[write_idx] koji je možda još u queue-u ili ga
-         * FFT_Task upravo čita — time bismo izazvali torn read. Samo proizvođač
+         * LOC_Task upravo čita — time bismo izazvali torn read. Samo proizvođač
          * šalje u ovaj queue, pa se prostor između provjere i slanja ne smanjuje. */
         if (uxQueueSpacesAvailable(queueSnapshotHandle) == 0u) { continue; }
 
@@ -97,7 +91,7 @@ static void StartACQTask(void const *argument)
     }
 }
 
-static void StartFFTTask(void const *argument)
+static void StartLOCTask(void const *argument)
 {
     loc_result_t result;
     uint8_t read_idx;
@@ -113,11 +107,11 @@ static void StartFFTTask(void const *argument)
                HALF_BUFFER * sizeof(uint16_t));
 
         /* Dok prethodni raw CSV još nije ispisan, ne pokreći obradu — inače bi
-         * GCC_SnapshotRaw prepisao dbg_raw_chX koji UART_Task upravo šalje.
+         * RawCapture_Snapshot prepisao dbg_raw_chX koji UART_Task upravo šalje.
          * Sliding buffer se i dalje održava gore, pa ne gubimo kontinuitet. */
         if (!capture_ready) {
             /* LOC_PROCESS interno traži energetski vrh, centrira prozor te
-             * napuni dbg_raw_chX (GCC_SnapshotRaw) pri detekciji. */
+             * napuni dbg_raw_chX (RawCapture_Snapshot) pri detekciji. */
             if (LOC_PROCESS(sliding_buf, &result)) {
                 capture_ready = 1;   /* dbg_raw_chX sada drži ovaj prozor */
                 xQueueSend(queueResultHandle, &result, 0);
@@ -144,7 +138,7 @@ static void StartUARTTask(void const *argument)
             } */
             osMutexRelease(uartMutexHandle);
 
-            /* Otpusti zamrzavanje — FFT_Task smije ponovno tražiti detekcije. */
+            /* Otpusti zamrzavanje — LOC_Task smije ponovno tražiti detekcije. */
             capture_ready = 0;
         }
     }
@@ -153,7 +147,7 @@ static void StartUARTTask(void const *argument)
 /*
  * IMU_Task — čita MPU-9250, fuzira orijentaciju (Mahony), šalje paket 0x05.
  *
- * Prioritet BelowNormal: ispod ACQ_Task (Realtime) i FFT_Task (High) — nikad ne
+ * Prioritet BelowNormal: ispod ACQ_Task (Realtime) i LOC_Task (High) — nikad ne
  * ometa akviziciju ni lokalizaciju. Iznad UART_Task (Low) nije nužno; oba dijele
  * UART preko uartMutexHandle.
  *
@@ -212,8 +206,8 @@ void app_tasks_init(void)
     osThreadDef(ACQ_Task,  StartACQTask,  osPriorityRealtime,    0, 256);
     (void)osThreadCreate(osThread(ACQ_Task),  NULL);
 
-    osThreadDef(FFT_Task,  StartFFTTask,  osPriorityHigh,        0, 1024);
-    (void)osThreadCreate(osThread(FFT_Task),  NULL);
+    osThreadDef(LOC_Task,  StartLOCTask,  osPriorityHigh,        0, 1024);
+    (void)osThreadCreate(osThread(LOC_Task),  NULL);
 
     osThreadDef(UART_Task, StartUARTTask, osPriorityLow,         0, 256);
     (void)osThreadCreate(osThread(UART_Task), NULL);

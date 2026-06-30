@@ -20,7 +20,9 @@ static const char *TAG = "SOUND_LOC_PROC";
  *                           + [0xCC][0xDD]
  * Format ORI  (Type 0x05): [0xAA][0xBB][0x05][RL_H][RL_L][PT_H][PT_L][YW_H][YW_L][FLAGS][0xCC][0xDD]
  *                           RL=roll, PT=pitch, YW=yaw (0.1°, big-endian int16);
- *                           FLAGS bit0 = magnetometar valjan (yaw apsolutan)
+ *                           FLAGS bit0 = magnetometar valjan (yaw apsolutan).
+ *                           NAPOMENA: YW i FLAGS se na ESP32 NE koriste — yaw
+ *                           se preskače, vizualizacija ide samo po roll/pitch.
  *
  * VAŽNO: Type 0x03 (smjer zvuka) i 0x05 (orijentacija plohe) su RAZLIČITI —
  * tako ESP32 zna dolazi li podatak iz lokalizacije ili iz IMU senzora.
@@ -82,11 +84,9 @@ static void rx_task(void *arg) {
     uint8_t     el_l     = 0;
     uint8_t     str_val  = 0;
 
-    /* Orijentacija (Type 0x05) */
+    /* Orijentacija (Type 0x05) — koristimo samo roll i pitch */
     uint8_t     ori_rl_h = 0, ori_rl_l = 0;
     uint8_t     ori_pt_h = 0, ori_pt_l = 0;
-    uint8_t     ori_yw_h = 0, ori_yw_l = 0;
-    uint8_t     ori_flags = 0;
 
     /* RAW capture (Type 0x04) */
     static uint8_t raw_buf[RAW_MAX_BYTES];
@@ -192,9 +192,9 @@ static void rx_task(void *arg) {
                 case S_ORI_RL_L: ori_rl_l = b; state = S_ORI_PT_H; break;
                 case S_ORI_PT_H: ori_pt_h = b; state = S_ORI_PT_L; break;
                 case S_ORI_PT_L: ori_pt_l = b; state = S_ORI_YW_H; break;
-                case S_ORI_YW_H: ori_yw_h = b; state = S_ORI_YW_L; break;
-                case S_ORI_YW_L: ori_yw_l = b; state = S_ORI_FLAGS; break;
-                case S_ORI_FLAGS: ori_flags = b; state = S_EOF1; break;
+                case S_ORI_YW_H: state = S_ORI_YW_L;  break;  // yaw se ignorira
+                case S_ORI_YW_L: state = S_ORI_FLAGS; break;  // (samo poravnanje okvira)
+                case S_ORI_FLAGS: state = S_EOF1; break;      // FLAGS se ne koristi
                 case S_EOF1:
                     state = (b == ANGLE_PKT_EOF1) ? S_EOF2 : S_SOF1;
                     break;
@@ -203,17 +203,14 @@ static void rx_task(void *arg) {
                         if (pkt_type == ANGLE_PKT_TYPE_RAW) {
                             raw_capture_print(raw_buf, raw_nch, raw_n);
                         } else if (pkt_type == 0x05) {
-                            /* Orijentacija plohe (IMU) — NE smjer zvuka. */
+                            /* Orijentacija plohe (IMU) — NE smjer zvuka.
+                             * Yaw i FLAGS se ne koriste (samo roll/pitch). */
                             int16_t roll_t  = (int16_t)((ori_rl_h << 8) | ori_rl_l);
                             int16_t pitch_t = (int16_t)((ori_pt_h << 8) | ori_pt_l);
-                            int16_t yaw_t   = (int16_t)((ori_yw_h << 8) | ori_yw_l);
                             float roll  = roll_t  / 10.0f;
                             float pitch = pitch_t / 10.0f;
-                            float yaw   = yaw_t   / 10.0f;
-                            uint8_t mag_ok = ori_flags & 0x01;
-                            ESP_LOGI(TAG, "ORI | Roll: %.1f° | Pitch: %.1f° | Yaw: %.1f° | mag=%d",
-                                     roll, pitch, yaw, mag_ok);
-                            web_server_send_orientation(roll, pitch, yaw, mag_ok);
+                            ESP_LOGI(TAG, "ORI | Roll: %.1f° | Pitch: %.1f°", roll, pitch);
+                            web_server_send_orientation(roll, pitch);
                         } else {
                             int16_t az_tenth = (int16_t)((az_h << 8) | az_l);
                             int16_t el_tenth = (pkt_type == 0x03) ? (int16_t)((el_h << 8) | el_l) : 0;

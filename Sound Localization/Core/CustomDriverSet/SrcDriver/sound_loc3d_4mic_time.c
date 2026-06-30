@@ -36,8 +36,9 @@ volatile float    dbg4_sx, dbg4_sy, dbg4_sz;
 /* Ukupan broj frejmova u sliding bufferu. */
 #define WIN_FRAMES   (2u * SAMPLES_PER_CHANNEL)
 
-/* Fiksna "DC" razina i prag odstupanja. Uzorak okida kad |sample − DC| > THR. */
-#define DC_LEVEL         2050
+/* Fiksna "DC" razina i prag odstupanja. Uzorak okida kad |sample − DC| > THR.
+ * DC_LEVEL = 2048 = sredina opsega 12-bitnog ADC-a (2^11), tj. ~1/2 V_CC. */
+#define DC_LEVEL         2048
 #define THRESHOLD_LEVEL  250
 
 /* Maksimalna razlika onseta između kanala (uzoraka). Veće → odbaci (nekonzistentno).

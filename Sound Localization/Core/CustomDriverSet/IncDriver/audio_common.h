@@ -15,7 +15,7 @@
 
 /* ── Lokalizacijski mod ────────────────────────────────────────────────────────
  * Sve verzije rade TIME-domain onset TDOA (prag na amplitudi po kanalu, TDOA iz
- * razmaka onseta). FFT/GCC-PHAT verzije su uklonjene iz projekta.
+ * razmaka onseta). Frekvencijske (FFT) verzije su uklonjene iz projekta.
  *
  * 1 = puna 4-mikrofonska TIME-domain lokalizacija (sound_loc3d_4mic_time.c).
  *     Koristi sva 4 mikrofona (pravilan tetraedar) → pravi predznak elevacije,
@@ -23,10 +23,10 @@
  * 0 = 3-mikrofonska TIME-domain lokalizacija (loc3d_3mic_time.c): M1,M2,M3;
  *     M4 se uzorkuje ali se NE koristi. Elevacija uz pretpostavku z >= 0.
  *     Koristi dok je 4. mikrofon (RANK4, PC2) neispravan. */
-#define USE_4MIC_TIME_LOC     0
+#define USE_4MIC_TIME_LOC     1
 
 /* Zadržano radi kompatibilnosti konfiguracije: jedina podržana vrijednost je 1
- * (frekvencijska/GCC-PHAT domena više ne postoji). task_manager.c će prijaviti
+ * (frekvencijska domena više ne postoji). task_manager.c će prijaviti
  * #error ako je postavljeno na 0. */
 #define USE_TIME_DOMAIN_LOC   1
 

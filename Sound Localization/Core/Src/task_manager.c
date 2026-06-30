@@ -10,7 +10,7 @@
 /* Lokalizacijski mod biran u audio_common.h. Aliasi ispod čine ostatak koda
  * neovisnim o izabranoj verziji: isti tip rezultata i isti pozivi.
  * Prioritet: USE_4MIC_TIME_LOC > 3-mic time-domain (default).
- * FFT/GCC-PHAT verzije (sound_loc_3d, loc3d_3mic) su uklonjene — sve su
+ * Frekvencijske (FFT) verzije (sound_loc_3d, loc3d_3mic) su uklonjene — sve su
  * time-domain (TDOA pragom). USE_TIME_DOMAIN_LOC se zadržava radi kompatibilnosti
  * konfiguracije, ali je jedina podržana vrijednost 1. */
 #if USE_4MIC_TIME_LOC
@@ -20,7 +20,7 @@
   #define LOC_PROCESS(b, r)     LOC3D_4MIC_TIME_Process((b), (r))
 #else
   #if defined(USE_TIME_DOMAIN_LOC) && !USE_TIME_DOMAIN_LOC
-    #error "FFT/GCC-PHAT lokalizacija je uklonjena. Postavi USE_TIME_DOMAIN_LOC=1 ili USE_4MIC_TIME_LOC=1."
+    #error "Frekvencijska (FFT) lokalizacija je uklonjena. Postavi USE_TIME_DOMAIN_LOC=1 ili USE_4MIC_TIME_LOC=1."
   #endif
   #include "loc3d_3mic_time.h"
   typedef loc3d_3mic_time_result_t loc_result_t;

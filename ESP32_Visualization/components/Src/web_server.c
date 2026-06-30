@@ -40,7 +40,7 @@ static const char *INDEX_HTML =
 "padding:3px 6px;border-radius:3px;pointer-events:none;border:1px solid #f44;}"
 "</style></head><body>"
 "<div id='hud'>Azimuth: --&deg; | Elevation: --&deg; | Strength: --</div>"
-"<div id='ori-hud' style='position:fixed;top:44px;left:12px;color:#9cf;font:13px/1.5 monospace;background:rgba(0,0,0,.6);padding:6px 12px;border-radius:6px;pointer-events:none;'>Roll: --&deg; | Pitch: --&deg; | Yaw: --&deg;</div>"
+"<div id='ori-hud' style='position:fixed;top:44px;left:12px;color:#9cf;font:13px/1.5 monospace;background:rgba(0,0,0,.6);padding:6px 12px;border-radius:6px;pointer-events:none;'>Roll: --&deg; | Pitch: --&deg;</div>"
 "<div id='sts'>Connecting...</div>"
 "<div id='mic-info'>Mikrofoni:<br></div>"
 "<div id='mic-labels'></div>"
@@ -91,14 +91,13 @@ static const char *INDEX_HTML =
 "return new Float32Array([1,0,0,0,0,c,s,0,0,-s,c,0,0,0,0,1]);}"
 "function rmY(a){var c=Math.cos(a),s=Math.sin(a);"
 "return new Float32Array([c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]);}"
-"function rmZ(a){var c=Math.cos(a),s=Math.sin(a);"
-"return new Float32Array([c,s,0,0,-s,c,0,0,0,0,1,0,0,0,0,1]);}"
+/* rmZ (rotacija oko Z = yaw) uklonjen jer se yaw ne koristi. */
 "var ID=new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);"
 
 /* Orijentacija plohe (radijani) — iz IMU 0x05 paketa. Model matrica ploče
- * = Rz(yaw)·Ry(pitch)·Rx(roll), ista ZYX konvencija kao Mahony na STM32. */
-"var gRoll=0,gPitch=0,gYaw=0;"
-"function boardM(){return mm(rmZ(gYaw),mm(rmY(gPitch),rmX(gRoll)));}"
+ * = Ry(pitch)·Rx(roll); yaw se ne koristi. */
+"var gRoll=0,gPitch=0;"
+"function boardM(){return mm(rmY(gPitch),rmX(gRoll));}"
 
 /* --- Geometry: box (36 vrhova, samo pos) --- */
 "function boxGeo(){"
@@ -230,11 +229,10 @@ static const char *INDEX_HTML =
 "ws.onmessage=function(ev){"
 "try{var d=JSON.parse(ev.data);"
 "if(d.type==='orient'){"
-/* Orijentacija plohe: spremi kuteve (°→rad). Bez magnetometra yaw ostaje 0
- * (drift bi bio besmislen) — zakreće se samo po pitch/roll iz gravitacije. */
+/* Orijentacija plohe: spremi kuteve (°→rad). Zakreće se samo po
+ * pitch/roll iz gravitacije (yaw se ne koristi). */
 "gRoll=d.roll*Math.PI/180;gPitch=d.pitch*Math.PI/180;"
-"gYaw=d.mag?(d.yaw*Math.PI/180):0;"
-"oriHud.innerHTML='Roll: '+d.roll.toFixed(1)+'&deg; | Pitch: '+d.pitch.toFixed(1)+'&deg; | Yaw: '+(d.mag?d.yaw.toFixed(1)+'&deg;':'— (no compass)');"
+"oriHud.innerHTML='Roll: '+d.roll.toFixed(1)+'&deg; | Pitch: '+d.pitch.toFixed(1)+'&deg;';"
 "}else{"
 /* Smjer zvuka (lokalni okvir ploče). */
 "hud.innerHTML='Azimuth: '+d.azimuth.toFixed(1)+'&deg; | Elevation: '+(d.polar||0).toFixed(1)+'&deg; | Strength: '+d.strength;"
@@ -436,11 +434,11 @@ void web_server_send_data(float azimuth, float polar, uint8_t strength) {
     ws_broadcast_json(json);
 }
 
-void web_server_send_orientation(float roll, float pitch, float yaw, uint8_t mag_valid) {
+void web_server_send_orientation(float roll, float pitch) {
     char json[96];
     snprintf(json, sizeof(json),
-             "{\"type\":\"orient\",\"roll\":%.1f,\"pitch\":%.1f,\"yaw\":%.1f,\"mag\":%u}",
-             roll, pitch, yaw, mag_valid);
+             "{\"type\":\"orient\",\"roll\":%.1f,\"pitch\":%.1f}",
+             roll, pitch);
     ws_broadcast_json(json);
 }
 

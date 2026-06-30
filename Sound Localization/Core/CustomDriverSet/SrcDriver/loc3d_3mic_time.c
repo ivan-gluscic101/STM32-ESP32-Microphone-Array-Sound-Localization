@@ -6,7 +6,7 @@
  * loc3d_3mic_time.c — time-domain TDOA lokalizacija (M1, M2, M3) PRAGOM.
  *
  * Princip (bez FFT, bez micanja DC-a, bez energy peak finda):
- *   - DC je fiksno DC_LEVEL (2050). Uzorak "okida" kad |sample − DC| > THR (250).
+ *   - DC je fiksno DC_LEVEL (2048). Uzorak "okida" kad |sample − DC| > THR (250).
  *   - Idemo redom kroz uzorke od početka buffera. Za svaki kanal (M1/M2/M3)
  *     bilježimo PRVI uzorak u kojem okine. ref_mic = onaj koji okine prvi.
  *   - Razlika onset indeksa između kanala = TDOA (u uzorcima). Iz toga smjer.
@@ -32,8 +32,9 @@ volatile float    dbgt_sx, dbgt_sy, dbgt_sz;
 /* Ukupan broj frejmova u sliding bufferu. */
 #define WIN_FRAMES   (2u * SAMPLES_PER_CHANNEL)
 
-/* Fiksna "DC" razina i prag odstupanja. Uzorak okida kad |sample − DC| > THR. */
-#define DC_LEVEL         2050
+/* Fiksna "DC" razina i prag odstupanja. Uzorak okida kad |sample − DC| > THR.
+ * DC_LEVEL = 2048 = sredina opsega 12-bitnog ADC-a (2^11), tj. ~1/2 V_CC. */
+#define DC_LEVEL         2048
 #define THRESHOLD_LEVEL  250
 
 /* Maksimalna razlika onseta između kanala (uzoraka). Veće → odbaci (nekonzistentno).

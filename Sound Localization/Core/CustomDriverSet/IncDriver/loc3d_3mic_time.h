@@ -3,10 +3,10 @@
 
 /*
  * loc3d_3mic_time.h — lokalizacija zvuka s 3 mikrofona (M1, M2, M3) u
- * VREMENSKOJ domeni, bez FFT/GCC-PHAT.
+ * VREMENSKOJ domeni, bez FFT (frekvencijske domene).
  *
  * Princip (time-of-arrival pragom, bez FFT, bez micanja DC-a):
- *   1. DC je fiksno DC_LEVEL (2050). Uzorak "okida" kad |sample − DC| > THR (250).
+ *   1. DC je fiksno DC_LEVEL (2048). Uzorak "okida" kad |sample − DC| > THR (250).
  *   2. Idemo redom kroz uzorke od početka buffera; za svaki kanal (M1/M2/M3)
  *      bilježimo PRVI uzorak u kojem okine. ref_mic = onaj koji okine prvi.
  *   3. TDOA za geometriju je uvijek relativan na M1:

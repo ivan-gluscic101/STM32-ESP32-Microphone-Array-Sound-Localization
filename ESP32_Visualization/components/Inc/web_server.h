@@ -26,10 +26,10 @@ void web_server_send_data(float azimuth, float polar, uint8_t strength);
  *
  *        roll  — rotacija oko X osi (stupnjevi, -180..+180)
  *        pitch — rotacija oko Y osi (stupnjevi, -90..+90)
- *        yaw   — rotacija oko Z osi (stupnjevi, 0..360); ako mag_valid=0,
- *                yaw je relativan (žiro drift) i vizualizacija ga može ignorirati.
- *        mag_valid — 1 ako je magnetometar dao apsolutni heading, inače 0.
+ *
+ *        Yaw se ne koristi (vizualizacija zakreće plohu samo po roll/pitch
+ *        iz gravitacije), pa nije ni parametar.
  */
-void web_server_send_orientation(float roll, float pitch, float yaw, uint8_t mag_valid);
+void web_server_send_orientation(float roll, float pitch);
 
 #endif

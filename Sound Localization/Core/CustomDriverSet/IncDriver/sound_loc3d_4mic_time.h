@@ -3,7 +3,7 @@
 
 /*
  * sound_loc3d_4mic_time.h — lokalizacija zvuka sa 4 mikrofona (M1..M4) u
- * VREMENSKOJ domeni, bez FFT/GCC-PHAT.
+ * VREMENSKOJ domeni, bez FFT (frekvencijske domene).
  *
  * Analogno loc3d_3mic_time.c, ali koristi i M4 (RANK4) kao 4. mjerenje za
  * rješavanje punog 3D sustava (3×3). PRETPOSTAVLJA z >= 0 (izvor iznad/u ravnini
